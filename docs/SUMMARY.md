@@ -57,6 +57,7 @@ Last refreshed: **February 18, 2026**.
 - [release-process.md](release-process.md)
 - [troubleshooting.md](troubleshooting.md)
 - [network-deployment.md](network-deployment.md)
+- [node-control-websocket-design.md](node-control-websocket-design.md) — Gateway WebSocket for nodes + nodes tool (proposal)
 - [mattermost-setup.md](mattermost-setup.md)
 
 ### 4) Security Design & Proposals

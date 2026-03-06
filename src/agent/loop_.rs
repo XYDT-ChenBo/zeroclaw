@@ -692,7 +692,7 @@ pub(crate) async fn run_tool_call_loop(
 
         // Unified path via Provider::chat so provider-specific native tool logic
         // (OpenAI/Anthropic/OpenRouter/compatible adapters) is honored.
-        let request_tools = if use_native_tools {
+        let request_tools = if !tool_specs.is_empty() {
             Some(tool_specs.as_slice())
         } else {
             None
@@ -2309,6 +2309,51 @@ mod tests {
         }
     }
 
+    struct PromptGuidedToolCaptureProvider {
+        seen_tools: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Provider for PromptGuidedToolCaptureProvider {
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                native_tool_calling: false,
+                vision: false,
+            }
+        }
+
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("chat_with_system should not be called in this test");
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            let names = request
+                .tools
+                .unwrap_or_default()
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>();
+            *self.seen_tools.lock().expect("seen_tools lock should be valid") = names;
+            Ok(ChatResponse {
+                text: Some("done".to_string()),
+                tool_calls: Vec::new(),
+                usage: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
     struct CountingTool {
         name: String,
         invocations: Arc<AtomicUsize>,
@@ -2549,6 +2594,47 @@ mod tests {
 
         assert_eq!(result, "vision-ok");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_tool_call_loop_passes_tools_to_prompt_guided_provider() {
+        let seen_tools = Arc::new(Mutex::new(Vec::new()));
+        let provider = PromptGuidedToolCaptureProvider {
+            seen_tools: Arc::clone(&seen_tools),
+        };
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> =
+            vec![Box::new(CountingTool::new("nodes", Arc::clone(&invocations)))];
+        let observer = NoopObserver;
+        let mut history = vec![ChatMessage::user("hello")];
+
+        let response = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "httpchat",
+            &crate::config::MultimodalConfig::default(),
+            2,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("tool loop should complete");
+
+        assert_eq!(response, "done");
+        let names = seen_tools
+            .lock()
+            .expect("seen_tools lock should be valid")
+            .clone();
+        assert!(names.contains(&"nodes".to_string()));
     }
 
     #[test]

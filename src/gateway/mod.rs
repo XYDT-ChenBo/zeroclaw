@@ -8,10 +8,12 @@
 //! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
+mod node_registry;
 mod openai_compat;
 pub mod sse;
 pub mod static_files;
 pub mod ws;
+pub mod ws_node;
 
 use crate::channels::{
     Channel, LinqChannel, NextcloudTalkChannel, QQChannel, SendMessage, WatiChannel,
@@ -25,7 +27,7 @@ use crate::runtime;
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
 use crate::security::SecurityPolicy;
 use crate::tools::traits::ToolSpec;
-use crate::tools::{self, Tool};
+use crate::tools::{self, NodeRegistry, NodesTool, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
 use axum::{
@@ -49,6 +51,8 @@ use uuid::Uuid;
 pub const MAX_BODY_SIZE: usize = 65_536;
 /// Request timeout (30s) — prevents slow-loris attacks
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// `/response` timeout (120s) — allows longer non-streaming agent runs
+pub const RESPONSE_TIMEOUT_SECS: u64 = 120;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Fallback max distinct client keys tracked in gateway rate limiter.
@@ -324,6 +328,8 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Connected-node registry when node_control.enabled (WebSocket nodes + nodes tool).
+    pub node_registry: Option<Arc<node_registry::ConnectedNodeRegistry>>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -396,7 +402,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         (None, None)
     };
 
-    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools::all_tools_with_runtime(
+    let mut tools_list: Vec<Box<dyn Tool>> = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
         runtime,
@@ -410,7 +416,18 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
-    ));
+    );
+
+    let node_registry: Option<Arc<node_registry::ConnectedNodeRegistry>> =
+        if config.gateway.node_control.enabled {
+            let registry = Arc::new(node_registry::ConnectedNodeRegistry::new());
+            tools_list.push(Box::new(NodesTool::new(Arc::clone(&registry) as Arc<dyn NodeRegistry>)));
+            Some(registry)
+        } else {
+            None
+        };
+
+    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools_list);
     let tools_registry: Arc<Vec<ToolSpec>> =
         Arc::new(tools_registry_exec.iter().map(|t| t.spec()).collect());
     let max_tool_iterations = config.agent.max_tool_iterations;
@@ -628,12 +645,14 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         println!("  POST /qq        — QQ Bot webhook (validation + events)");
     }
     if config.gateway.node_control.enabled {
-        println!("  POST /api/node-control — experimental node-control RPC scaffold");
+        println!("  POST /api/node-control — experimental node-control RPC");
+        println!("  GET  /ws/node        — WebSocket for node connections");
     }
     println!("  POST /v1/chat/completions — OpenAI-compatible chat");
     println!("  GET  /v1/models — list available models");
     println!("  GET  /api/*     — REST API (bearer token required)");
     println!("  GET  /ws/chat   — WebSocket agent chat");
+    println!("  POST /response  — HTTP agent chat (non-streaming)");
     println!("  GET  /health    — health check");
     println!("  GET  /metrics   — Prometheus metrics");
     if let Some(code) = pairing.pairing_code() {
@@ -692,6 +711,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         max_tool_iterations,
         cost_tracker,
         event_tx,
+        node_registry,
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -711,8 +731,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
         ));
 
-    // Build router with middleware
-    let app = Router::new()
+    // Core routes keep the default request timeout.
+    let core_router = Router::new()
         // ── Existing routes ──
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
@@ -749,18 +769,33 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/node-control", post(handle_node_control))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
-        // ── WebSocket agent chat ──
+        // ── WebSocket chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
+        // ── WebSocket node connections (when node_control.enabled) ──
+        .route("/ws/node", get(ws_node::handle_ws_node))
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
         .merge(config_put_router)
-        .with_state(state)
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
-        ))
+        ));
+
+    // `/response` uses a dedicated, longer timeout.
+    let response_router = Router::new()
+        .route("/response", post(ws::handle_http_response))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(RESPONSE_TIMEOUT_SECS),
+        ));
+
+    // Build router with middleware
+    let app = Router::new()
+        .merge(core_router)
+        .merge(response_router)
+        .with_state(state)
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback));
 
@@ -1063,17 +1098,32 @@ async fn handle_node_control(
     let method = request.method.trim();
     match method {
         "node.list" => {
-            let nodes = node_control
-                .allowed_node_ids
-                .iter()
-                .map(|node_id| {
-                    serde_json::json!({
-                        "node_id": node_id,
-                        "status": "unpaired",
-                        "capabilities": []
+            let nodes: Vec<serde_json::Value> = if let Some(ref registry) = state.node_registry {
+                registry
+                    .list_filtered(&node_control.allowed_node_ids)
+                    .into_iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "node_id": n.node_id,
+                            "status": n.status,
+                            "capabilities": n.capabilities,
+                            "meta": n.meta
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
+                    .collect()
+            } else {
+                node_control
+                    .allowed_node_ids
+                    .iter()
+                    .map(|node_id| {
+                        serde_json::json!({
+                            "node_id": node_id,
+                            "status": "unpaired",
+                            "capabilities": []
+                        })
+                    })
+                    .collect()
+            };
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1102,19 +1152,47 @@ async fn handle_node_control(
                 );
             }
 
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "ok": true,
-                    "method": "node.describe",
-                    "node_id": node_id,
-                    "description": {
-                        "status": "stub",
-                        "capabilities": [],
-                        "message": "Node descriptor scaffold is enabled; runtime backend is not wired yet."
-                    }
-                })),
-            )
+            let (status, body) = if let Some(ref registry) = state.node_registry {
+                match registry.describe_filtered(node_id, &node_control.allowed_node_ids) {
+                    Some(desc) => (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "ok": true,
+                            "method": "node.describe",
+                            "node_id": node_id,
+                            "description": {
+                                "status": desc.status,
+                                "capabilities": desc.capabilities,
+                                "meta": desc.meta
+                            }
+                        }),
+                    ),
+                    None => (
+                        StatusCode::NOT_FOUND,
+                        serde_json::json!({
+                            "ok": false,
+                            "method": "node.describe",
+                            "node_id": node_id,
+                            "error": "node not found or not connected"
+                        }),
+                    ),
+                }
+            } else {
+                (
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "ok": true,
+                        "method": "node.describe",
+                        "node_id": node_id,
+                        "description": {
+                            "status": "stub",
+                            "capabilities": [],
+                            "message": "Node descriptor scaffold is enabled; runtime backend is not wired yet."
+                        }
+                    }),
+                )
+            };
+            (status, Json(body))
         }
         "node.invoke" => {
             let Some(node_id) = request
@@ -1135,17 +1213,51 @@ async fn handle_node_control(
                 );
             }
 
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "method": "node.invoke",
-                    "node_id": node_id,
-                    "capability": request.capability,
-                    "arguments": request.arguments,
-                    "error": "node.invoke backend is not implemented yet in this scaffold"
-                })),
-            )
+            let capability = request
+                .capability
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            let arguments = request.arguments.clone();
+
+            if let Some(ref registry) = state.node_registry {
+                match registry
+                    .invoke(node_id, capability, arguments)
+                    .await
+                {
+                    Ok(res) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "ok": res.success,
+                            "method": "node.invoke",
+                            "node_id": node_id,
+                            "output": res.output,
+                            "error": res.error
+                        })),
+                    ),
+                    Err(e) => (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "method": "node.invoke",
+                            "node_id": node_id,
+                            "error": e.to_string()
+                        })),
+                    ),
+                }
+            } else {
+                (
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "method": "node.invoke",
+                        "node_id": node_id,
+                        "capability": request.capability,
+                        "arguments": request.arguments,
+                        "error": "node.invoke backend is not implemented yet in this scaffold"
+                    })),
+                )
+            }
         }
         _ => (
             StatusCode::BAD_REQUEST,
@@ -1964,6 +2076,11 @@ mod tests {
     }
 
     #[test]
+    fn response_timeout_is_120_seconds() {
+        assert_eq!(RESPONSE_TIMEOUT_SECS, 120);
+    }
+
+    #[test]
     fn webhook_body_requires_message_field() {
         let valid = r#"{"message": "hello"}"#;
         let parsed: Result<WebhookBody, _> = serde_json::from_str(valid);
@@ -2033,6 +2150,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -2089,6 +2207,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -2131,6 +2250,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_metrics(State(state), test_public_connect_info(), HeaderMap::new())
@@ -2174,6 +2294,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let unauthorized =
@@ -2643,6 +2764,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2710,6 +2832,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_webhook(
@@ -2759,6 +2882,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_node_control(
@@ -2813,6 +2937,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_node_control(
@@ -2872,6 +2997,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let headers = HeaderMap::new();
@@ -2953,6 +3079,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_webhook(
@@ -3006,6 +3133,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -3064,6 +3192,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -3127,6 +3256,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -3186,6 +3316,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -3238,6 +3369,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let response = handle_qq_webhook(
@@ -3289,6 +3421,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();

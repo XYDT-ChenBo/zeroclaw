@@ -19,8 +19,9 @@ use axum::{
         State, WebSocketUpgrade,
     },
     http::{header, HeaderMap},
-    response::IntoResponse,
+    response::{IntoResponse, Json},
 };
+use serde::Deserialize;
 
 const EMPTY_WS_RESPONSE_FALLBACK: &str =
     "Tool execution completed, but the model returned no final text response. Please ask me to summarize the result.";
@@ -109,6 +110,142 @@ fn finalize_ws_response(
     }
 
     EMPTY_WS_RESPONSE_FALLBACK.to_string()
+}
+
+#[derive(Deserialize)]
+pub struct HttpChatRequest {
+    pub content: String,
+}
+
+/// POST /response — HTTP agent chat (non-streaming, single-turn)
+pub async fn handle_http_response(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HttpChatRequest>,
+) -> impl IntoResponse {
+    // Auth via Authorization header (same pairing model as WebSocket chat).
+    if state.pairing.require_pairing() {
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|auth| auth.strip_prefix("Bearer "))
+            .map(str::trim)
+            .unwrap_or("");
+        if !state.pairing.is_authenticated(token) {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Unauthorized — provide Authorization: Bearer <token>"
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let content = body.content.trim();
+    if content.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "content must not be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    // Build a fresh, single-turn history (system + user), mirroring WebSocket chat behavior.
+    let system_prompt = {
+        let config_guard = state.config.lock();
+        crate::channels::build_system_prompt(
+            &config_guard.workspace_dir,
+            &state.model,
+            &[],
+            &[],
+            Some(&config_guard.identity),
+            None,
+        )
+    };
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    history.push(ChatMessage::system(&system_prompt));
+    history.push(ChatMessage::user(content));
+
+    let approval_manager = {
+        let config_guard = state.config.lock();
+        ApprovalManager::from_config(&config_guard.autonomy)
+    };
+
+    let provider_label = state
+        .config
+        .lock()
+        .default_provider
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Broadcast agent_start event
+    let _ = state.event_tx.send(serde_json::json!({
+        "type": "agent_start",
+        "provider": provider_label,
+        "model": state.model,
+    }));
+
+    let result = run_tool_call_loop(
+        state.provider.as_ref(),
+        &mut history,
+        state.tools_registry_exec.as_ref(),
+        state.observer.as_ref(),
+        &provider_label,
+        &state.model,
+        state.temperature,
+        true, // silent - no console output
+        Some(&approval_manager),
+        "httpchat",
+        &state.multimodal,
+        state.max_tool_iterations,
+        None, // cancellation token
+        None, // delta streaming
+        None, // hooks
+        &[],  // excluded tools
+    )
+    .await;
+
+    match result {
+        Ok(response) => {
+            let safe_response =
+                finalize_ws_response(&response, &history, state.tools_registry_exec.as_ref());
+            history.push(ChatMessage::assistant(&safe_response));
+
+            // Broadcast agent_end event
+            let _ = state.event_tx.send(serde_json::json!({
+                "type": "agent_end",
+                "provider": provider_label,
+                "model": state.model,
+            }));
+
+            Json(serde_json::json!({
+                "response": safe_response,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            let sanitized = crate::providers::sanitize_api_error(&e.to_string());
+
+            // Broadcast error event
+            let _ = state.event_tx.send(serde_json::json!({
+                "type": "error",
+                "component": "http_chat",
+                "message": sanitized,
+            }));
+
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": sanitized,
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// GET /ws/chat — WebSocket upgrade for agent chat

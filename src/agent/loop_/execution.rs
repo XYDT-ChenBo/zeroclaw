@@ -10,6 +10,17 @@ use tokio_util::sync::CancellationToken;
 fn find_tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> Option<&'a dyn Tool> {
     tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
 }
+
+fn truncate_for_log(input: &str, max_chars: usize) -> String {
+    let mut chars = input.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
 async fn execute_one_tool(
     call_name: &str,
     call_arguments: serde_json::Value,
@@ -17,8 +28,10 @@ async fn execute_one_tool(
     observer: &dyn Observer,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<ToolExecutionOutcome> {
+    let scrubbed_args = scrub_credentials(&call_arguments.to_string());
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
+        arguments: truncate_for_log(&scrubbed_args, 2000),
     });
     let start = Instant::now();
 
