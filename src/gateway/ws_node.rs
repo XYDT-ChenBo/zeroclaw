@@ -1,4 +1,4 @@
-//! WebSocket handler for node connections (GET /ws/node).
+//! WebSocket handler for node connections (GET /).
 //!
 //! Protocol (OpenClaw gateway node-compatible, minimal subset):
 //! - Server sends:   event {type:"event",event:"connect.challenge",payload:{nonce}}
@@ -45,7 +45,7 @@ fn sanitize_ws_headers(headers: &HeaderMap) -> Value {
     }
     Value::Object(out)
 }
-/// GET /ws/node — WebSocket upgrade for node connections.
+/// GET / — WebSocket upgrade for node connections.
 pub async fn handle_ws_node(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -158,7 +158,49 @@ async fn handle_node_socket(
             }
         };
 
-        let params = parsed.get("params").cloned().unwrap_or(serde_json::json!({}));
+        let params = parsed
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        // Role 分流：只接受 role = "node" 的连接，其它（例如 "operator"）直接拒绝。
+        let role = params
+            .get("role")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("node");
+
+        if role != "node" {
+            tracing::warn!(
+                role = %role,
+                params = %params,
+                "node websocket connect rejected: unsupported role"
+            );
+
+            let connect_res = serde_json::json!({
+                "type": "res",
+                "id": connect_id,
+                "ok": false,
+                "error": {
+                    "code": "invalid_request",
+                    "message": format!("unsupported role: {role} (only 'node' is allowed)"),
+                }
+            });
+
+            if let Err(error) = socket
+                .send(Message::Text(connect_res.to_string().into()))
+                .await
+            {
+                tracing::warn!(
+                    role = %role,
+                    error = %error,
+                    "failed to send role rejection response to websocket client"
+                );
+            }
+
+            return;
+        }
 
         // Prefer device.id as node_id when present, otherwise fallback to client.id.
         let device_id = params

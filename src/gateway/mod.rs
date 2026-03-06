@@ -646,7 +646,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     }
     if config.gateway.node_control.enabled {
         println!("  POST /api/node-control — experimental node-control RPC");
-        println!("  GET  /ws/node        — WebSocket for node connections");
+        println!("  GET  /               — WebSocket for node connections");
     }
     println!("  POST /v1/chat/completions — OpenAI-compatible chat");
     println!("  GET  /v1/models — list available models");
@@ -772,7 +772,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── WebSocket chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
         // ── WebSocket node connections (when node_control.enabled) ──
-        .route("/ws/node", get(ws_node::handle_ws_node))
+        .route("/", get(ws_node::handle_ws_node))
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
