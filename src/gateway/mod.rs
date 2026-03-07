@@ -421,7 +421,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let node_registry: Option<Arc<node_registry::ConnectedNodeRegistry>> =
         if config.gateway.node_control.enabled {
             let registry = Arc::new(node_registry::ConnectedNodeRegistry::new());
-            tools_list.push(Box::new(NodesTool::new(Arc::clone(&registry) as Arc<dyn NodeRegistry>)));
+            tools_list.push(Box::new(NodesTool::new(
+                Arc::clone(&registry) as Arc<dyn NodeRegistry>,
+                &config.workspace_dir,
+            )));
             Some(registry)
         } else {
             None

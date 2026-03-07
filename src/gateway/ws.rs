@@ -175,12 +175,16 @@ pub async fn handle_http_response(
         ApprovalManager::from_config(&config_guard.autonomy)
     };
 
-    let provider_label = state
-        .config
-        .lock()
-        .default_provider
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+    let (provider_label, excluded_tools) = {
+        let config_guard = state.config.lock();
+        (
+            config_guard
+                .default_provider
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            config_guard.autonomy.non_cli_excluded_tools.clone(),
+        )
+    };
 
     // Broadcast agent_start event
     let _ = state.event_tx.send(serde_json::json!({
@@ -205,7 +209,7 @@ pub async fn handle_http_response(
         None, // cancellation token
         None, // delta streaming
         None, // hooks
-        &[],  // excluded tools
+        &excluded_tools,
     )
     .await;
 
@@ -325,13 +329,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         // Add user message to history
         history.push(ChatMessage::user(&content));
 
-        // Get provider info
-        let provider_label = state
-            .config
-            .lock()
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
+        // Get provider info and excluded tools
+        let (provider_label, excluded_tools) = {
+            let config_guard = state.config.lock();
+            (
+                config_guard
+                    .default_provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                config_guard.autonomy.non_cli_excluded_tools.clone(),
+            )
+        };
 
         // Broadcast agent_start event
         let _ = state.event_tx.send(serde_json::json!({
@@ -357,7 +365,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             None, // cancellation token
             None, // delta streaming
             None, // hooks
-            &[],  // excluded tools
+            &excluded_tools,
         )
         .await;
 

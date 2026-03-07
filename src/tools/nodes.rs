@@ -67,13 +67,142 @@ pub trait NodeRegistry: Send + Sync {
 /// Tool that exposes node list, describe, invoke, and run to the agent.
 /// Only registered when gateway runs with node_control.enabled and injects
 /// a concrete NodeRegistry.
+/// `workspace_dir` is used to save media (camera_snap, etc.) under workspace/media/.
 pub struct NodesTool {
     registry: Arc<dyn NodeRegistry>,
+    workspace_dir: PathBuf,
 }
 
 impl NodesTool {
-    pub fn new(registry: Arc<dyn NodeRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<dyn NodeRegistry>, workspace_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            registry,
+            workspace_dir: workspace_dir.into(),
+        }
+    }
+
+    /// Returns a path for node media files under workspace/media/.
+    fn temp_media_path(&self, kind: &str, label: &str, ext: &str) -> PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name = format!("node_{}_{}_{}.{}", kind, label, ts, ext);
+        if self.workspace_dir.as_os_str().is_empty() {
+            std::env::temp_dir().join("zeroclaw").join(name)
+        } else {
+            self.workspace_dir.join("media").join(name)
+        }
+    }
+
+    /// Resolves "node" arg to node_id. Supports: exact nodeId, displayName (from meta),
+    /// remoteIp (from meta), "current"/"default"/empty (first node), partial nodeId prefix (≥6 chars).
+    fn resolve_node(&self, args: &Value) -> Result<String> {
+        let ref_ = Self::read_optional_nonempty_string(args, "node").unwrap_or("");
+        let sessions = self.registry.list();
+
+        if ref_.is_empty() || ref_ == "current" || ref_ == "default" {
+            return sessions
+                .first()
+                .map(|n| n.node_id.clone())
+                .ok_or_else(|| anyhow::anyhow!("no nodes are currently connected"));
+        }
+
+        let q_norm = Self::normalize_node_key(ref_);
+        let mut matches: Vec<&NodeInfo> = Vec::new();
+
+        for n in &sessions {
+            if n.node_id == ref_ {
+                return Ok(n.node_id.clone());
+            }
+            if let Some(remote_ip) = n
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("remoteIp"))
+                .and_then(Value::as_str)
+            {
+                if remote_ip == ref_ {
+                    matches.push(n);
+                    continue;
+                }
+            }
+            let display_name = n
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("client"))
+                .and_then(|c| c.get("displayName"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            if let Some(dn) = display_name {
+                if Self::normalize_node_key(dn) == q_norm {
+                    matches.push(n);
+                    continue;
+                }
+            }
+            if ref_.len() >= 6 && n.node_id.starts_with(ref_) {
+                matches.push(n);
+            }
+        }
+
+        if matches.len() == 1 {
+            return Ok(matches[0].node_id.clone());
+        }
+        if matches.len() > 1 {
+            let names: Vec<String> = matches
+                .iter()
+                .map(|n| {
+                    n.meta
+                        .as_ref()
+                        .and_then(|m| m.get("client"))
+                        .and_then(|c| c.get("displayName"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .unwrap_or_else(|| n.node_id.clone())
+                })
+                .collect();
+            return Err(anyhow::anyhow!(
+                "ambiguous node {:?} (matches: {})",
+                ref_,
+                names.join(", ")
+            ));
+        }
+
+        let known: Vec<String> = sessions
+            .iter()
+            .map(|n| {
+                n.meta
+                    .as_ref()
+                    .and_then(|m| m.get("client"))
+                    .and_then(|c| c.get("displayName"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .unwrap_or_else(|| n.node_id.clone())
+            })
+            .collect();
+        let hint = if known.is_empty() {
+            String::new()
+        } else {
+            format!(" (connected: {})", known.join(", "))
+        };
+        Err(anyhow::anyhow!("no connected node matches {:?}{}", ref_, hint))
+    }
+
+    /// Converts string to lowercase slug (non-alnum → "-") for display-name comparison.
+    fn normalize_node_key(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut prev_dash = true;
+        for c in s.to_lowercase().chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c);
+                prev_dash = false;
+            } else if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+        out.trim_end_matches('-').to_string()
     }
 
     fn read_optional_nonempty_string<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -311,7 +440,7 @@ impl Tool for NodesTool {
                 },
                 "node": {
                     "type": "string",
-                    "description": "Node id/selector"
+                    "description": "Node id or Node Display Name/selector"
                 },
                 "requestId": {
                     "type": "string",
@@ -463,7 +592,7 @@ impl Tool for NodesTool {
                 })
             }
             "describe" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 match self.registry.describe(&node_id) {
                     Some(desc) => Ok(ToolResult {
                         success: true,
@@ -485,7 +614,7 @@ impl Tool for NodesTool {
                 )),
             }),
             "notify" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let title = Self::read_optional_nonempty_string(&args, "title");
                 let body = Self::read_optional_nonempty_string(&args, "body");
                 if title.is_none() && body.is_none() {
@@ -504,29 +633,93 @@ impl Tool for NodesTool {
                     .await
             }
             "camera_snap" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let facing = Self::read_optional_nonempty_string(&args, "facing").unwrap_or("both");
                 if !matches!(facing, "front" | "back" | "both") {
                     return Err(anyhow::anyhow!("invalid facing (front|back|both)"));
                 }
-                let arguments = serde_json::json!({
-                    "facing": facing,
-                    "maxWidth": args.get("maxWidth").cloned(),
-                    "quality": args.get("quality").cloned(),
-                    "format": "jpg",
-                    "delayMs": args.get("delayMs").cloned(),
-                    "deviceId": Self::read_optional_nonempty_string(&args, "deviceId"),
-                });
-                self.execute_invoke_action(&node_id, "camera.snap", arguments)
-                    .await
+                let facings: Vec<&str> = match facing {
+                    "front" | "back" => vec![facing],
+                    _ => vec!["front", "back"],
+                };
+
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                let mut files_out = String::new();
+
+                for f in &facings {
+                    let arguments = serde_json::json!({
+                        "facing": f,
+                        "maxWidth": args.get("maxWidth").cloned(),
+                        "quality": args.get("quality").cloned(),
+                        "format": "jpg",
+                        "delayMs": args.get("delayMs").cloned(),
+                        "deviceId": Self::read_optional_nonempty_string(&args, "deviceId"),
+                    });
+                    let res = self
+                        .registry
+                        .invoke(&node_id, "camera.snap", arguments)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("camera.snap facing={}: {e}", f))?;
+                    if !res.success {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: res.error.or_else(|| Some("invoke failed".to_string())),
+                        });
+                    }
+                    let payload = Self::parse_result_output(&res.output);
+                    let payload_obj = payload.as_object().ok_or_else(|| {
+                        anyhow::anyhow!("camera.snap: expected object in response")
+                    })?;
+                    let b64 = payload_obj
+                        .get("base64")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow::anyhow!("camera.snap: empty base64 in response"))?;
+                    let b64_clean = b64.replace(['\n', '\r'], "");
+                    let img_bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&b64_clean)
+                        .or_else(|_| {
+                            base64::engine::general_purpose::STANDARD_NO_PAD.decode(&b64_clean)
+                        })
+                        .map_err(|e| anyhow::anyhow!("camera.snap: base64 decode failed: {e}"))?;
+
+                    let path = self.temp_media_path("snap", f, "jpg");
+                    if let Some(parent) = path.parent() {
+                        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                            anyhow::anyhow!("camera.snap: mkdir: {e}")
+                        })?;
+                    }
+                    tokio::fs::write(&path, &img_bytes)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("camera.snap: write file: {e}"))?;
+
+                    files_out.push_str(&format!("MEDIA:{}\n", path.display()));
+                    results.push(serde_json::json!({
+                        "facing": f,
+                        "path": path.to_string_lossy(),
+                        "width": payload_obj.get("width"),
+                        "height": payload_obj.get("height"),
+                    }));
+                }
+
+                let output = format!(
+                    "{}{}",
+                    files_out,
+                    serde_json::to_string(&results).unwrap_or_default()
+                );
+                Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                })
             }
             "camera_list" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 self.execute_invoke_action(&node_id, "camera.list", serde_json::json!({}))
                     .await
             }
             "camera_clip" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let facing = Self::read_optional_nonempty_string(&args, "facing").unwrap_or("front");
                 if !matches!(facing, "front" | "back") {
                     return Err(anyhow::anyhow!("invalid facing (front|back)"));
@@ -543,7 +736,7 @@ impl Tool for NodesTool {
                     .await
             }
             "screen_record" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let duration_ms = Self::read_duration_ms(&args, 10_000)?;
                 let arguments = serde_json::json!({
                     "durationMs": duration_ms,
@@ -556,7 +749,7 @@ impl Tool for NodesTool {
                     .await
             }
             "location_get" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let desired_accuracy =
                     match Self::read_optional_nonempty_string(&args, "desiredAccuracy") {
                         Some(value) if matches!(value, "coarse" | "balanced" | "precise") => {
@@ -576,7 +769,7 @@ impl Tool for NodesTool {
                     .await
             }
             "invoke" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let invoke_command = Self::read_required_string(&args, "invokeCommand")?;
                 let invoke_params = if let Some(raw_json) =
                     Self::read_optional_nonempty_string(&args, "invokeParamsJson")
@@ -591,7 +784,7 @@ impl Tool for NodesTool {
                     .await
             }
             "run" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let raw_command = args
                     .get("command")
                     .and_then(Value::as_array)
@@ -618,7 +811,7 @@ impl Tool for NodesTool {
                     .await
             }
             "media_saveImage" => {
-                let node_id = Self::read_required_string(&args, "node")?;
+                let node_id = self.resolve_node(&args)?;
                 let params = Self::build_media_save_image_params(&args).await?;
                 self.execute_invoke_action(&node_id, "media.saveImage", params)
                     .await

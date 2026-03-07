@@ -89,13 +89,14 @@ pub async fn handle_ws_node(
     }
 
     tracing::info!(peer = %peer_addr, "node websocket upgrade accepted");
-    ws.on_upgrade(move |socket| handle_node_socket(socket, registry))
+    ws.on_upgrade(move |socket| handle_node_socket(socket, registry, peer_addr))
         .into_response()
 }
 
 async fn handle_node_socket(
     mut socket: WebSocket,
     registry: std::sync::Arc<super::node_registry::ConnectedNodeRegistry>,
+    peer_addr: SocketAddr,
 ) {
     // ── Step 1: send connect.challenge ─────────────────────────────
     let nonce = Uuid::new_v4().to_string();
@@ -247,7 +248,14 @@ async fn handle_node_socket(
             }
         }
 
-        let meta = Some(params.clone());
+        let mut meta = params.clone();
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "remoteIp".to_string(),
+                serde_json::Value::String(peer_addr.ip().to_string()),
+            );
+        }
+        let meta = Some(meta);
 
         let rx = registry.register(node_id.clone(), capabilities, meta);
         tracing::info!(
