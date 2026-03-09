@@ -1441,6 +1441,7 @@ pub async fn run(
     model_override: Option<String>,
     temperature: f64,
     peripheral_overrides: Vec<String>,
+    node_registry: Option<Arc<dyn crate::tools::NodeRegistry>>,
     interactive: bool,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
@@ -1500,6 +1501,15 @@ pub async fn run(
     if !peripheral_tools.is_empty() {
         tracing::info!(count = peripheral_tools.len(), "Peripheral tools added");
         tools_registry.extend(peripheral_tools);
+    }
+
+    if config.gateway.node_control.enabled {
+        if let Some(reg) = node_registry.as_ref() {
+            tools_registry.push(Box::new(crate::tools::NodesTool::new(
+                Arc::clone(reg) as Arc<dyn crate::tools::NodeRegistry>,
+                &config.workspace_dir,
+            )));
+        }
     }
 
     // ── Resolve provider ─────────────────────────────────────────
@@ -1700,6 +1710,11 @@ pub async fn run(
         None
     };
     let channel_name = if interactive { "cli" } else { "daemon" };
+    let excluded_tools: Vec<String> = if interactive {
+        Vec::new()
+    } else {
+        config.autonomy.non_cli_excluded_tools.clone()
+    };
 
     // ── Execute ──────────────────────────────────────────────────
     let start = Instant::now();
@@ -1752,7 +1767,7 @@ pub async fn run(
             None,
             None,
             None,
-            &[],
+            &excluded_tools,
         )
         .await?;
         final_output = response.clone();

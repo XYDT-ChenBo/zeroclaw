@@ -3,6 +3,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -17,6 +18,19 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
 
     crate::health::mark_component_ok("daemon");
 
+    // Shared connected-node registry when node_control.enabled. This instance
+    // is reused by the gateway (WebSocket nodes) and the scheduler/heartbeat
+    // agent loops via the generic NodeRegistry trait.
+    let shared_node_registry = if config.gateway.node_control.enabled {
+        Some(Arc::new(crate::gateway::node_registry::ConnectedNodeRegistry::new()))
+    } else {
+        None
+    };
+    let node_registry_trait: Option<Arc<dyn crate::tools::NodeRegistry>> =
+        shared_node_registry
+            .as_ref()
+            .map(|reg| Arc::clone(reg) as Arc<dyn crate::tools::NodeRegistry>);
+
     if config.heartbeat.enabled {
         let _ =
             crate::heartbeat::engine::HeartbeatEngine::ensure_heartbeat_file(&config.workspace_dir)
@@ -28,6 +42,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     {
         let gateway_cfg = config.clone();
         let gateway_host = host.clone();
+        let gateway_node_registry = shared_node_registry.clone();
         handles.push(spawn_component_supervisor(
             "gateway",
             initial_backoff,
@@ -35,7 +50,8 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             move || {
                 let cfg = gateway_cfg.clone();
                 let host = gateway_host.clone();
-                async move { crate::gateway::run_gateway(&host, port, cfg).await }
+                let node_registry = gateway_node_registry.clone();
+                async move { crate::gateway::run_gateway_with_registry(&host, port, cfg, node_registry).await }
             },
         ));
     }
@@ -60,26 +76,30 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
 
     if config.heartbeat.enabled {
         let heartbeat_cfg = config.clone();
+        let heartbeat_node_registry = node_registry_trait.clone();
         handles.push(spawn_component_supervisor(
             "heartbeat",
             initial_backoff,
             max_backoff,
             move || {
                 let cfg = heartbeat_cfg.clone();
-                async move { Box::pin(run_heartbeat_worker(cfg)).await }
+                let node_registry = heartbeat_node_registry.clone();
+                async move { Box::pin(run_heartbeat_worker(cfg, node_registry)).await }
             },
         ));
     }
 
     if config.cron.enabled {
         let scheduler_cfg = config.clone();
+        let scheduler_node_registry = node_registry_trait.clone();
         handles.push(spawn_component_supervisor(
             "scheduler",
             initial_backoff,
             max_backoff,
             move || {
                 let cfg = scheduler_cfg.clone();
-                async move { crate::cron::scheduler::run(cfg).await }
+                let node_registry = scheduler_node_registry.clone();
+                async move { crate::cron::scheduler::run(cfg, node_registry).await }
             },
         ));
     } else {
@@ -173,7 +193,10 @@ where
     })
 }
 
-async fn run_heartbeat_worker(config: Config) -> Result<()> {
+async fn run_heartbeat_worker(
+    config: Config,
+    node_registry: Option<Arc<dyn crate::tools::NodeRegistry>>,
+) -> Result<()> {
     let observer: std::sync::Arc<dyn crate::observability::Observer> =
         std::sync::Arc::from(crate::observability::create_observer(&config.observability));
     let engine = crate::heartbeat::engine::HeartbeatEngine::new(
@@ -205,6 +228,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 None,
                 temp,
                 vec![],
+                node_registry.clone(),
                 false,
             )
             .await

@@ -179,13 +179,17 @@ pub async fn handle_http_response(
     // Build history: system prompt + client messages (OpenAI chat completions format).
     let system_prompt = {
         let config_guard = state.config.lock();
-        crate::channels::build_system_prompt(
+        let skills =
+            crate::skills::load_skills_with_config(&config_guard.workspace_dir, &config_guard);
+        crate::channels::build_system_prompt_with_mode(
             &config_guard.workspace_dir,
             &state.model,
             &[],
-            &[],
+            &skills,
             Some(&config_guard.identity),
             None,
+            false,
+            config_guard.skills.prompt_injection_mode,
         )
     };
 
@@ -517,13 +521,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Build system prompt once for the session
     let system_prompt = {
         let config_guard = state.config.lock();
-        crate::channels::build_system_prompt(
+        let skills =
+            crate::skills::load_skills_with_config(&config_guard.workspace_dir, &config_guard);
+        crate::channels::build_system_prompt_with_mode(
             &config_guard.workspace_dir,
             &state.model,
             &[],
-            &[],
+            &skills,
             Some(&config_guard.identity),
             None,
+            false,
+            config_guard.skills.prompt_injection_mode,
         )
     };
 

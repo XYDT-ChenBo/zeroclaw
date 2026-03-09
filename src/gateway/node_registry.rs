@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// Default timeout for invoke/run when waiting for node response.
-pub const DEFAULT_NODE_INVOKE_TIMEOUT_SECS: u64 = 15;
+pub const DEFAULT_NODE_INVOKE_TIMEOUT_SECS: u64 = 60;
 
 /// Message sent from registry to the connection handler to be forwarded to the node.
 #[derive(Debug)]

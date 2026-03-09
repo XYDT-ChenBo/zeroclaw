@@ -864,6 +864,7 @@ async fn main() -> Result<()> {
                 model,
                 temperature,
                 peripheral,
+                None,
                 true,
             )
             .await

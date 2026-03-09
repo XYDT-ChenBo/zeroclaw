@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt};
 use std::process::Stdio;
 use std::sync::Arc;
+use crate::tools::NodeRegistry;
 use tokio::process::Command;
 use tokio::time::{self, Duration};
 
@@ -20,7 +21,10 @@ const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
 const SCHEDULER_COMPONENT: &str = "scheduler";
 
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(
+    config: Config,
+    node_registry: Option<Arc<dyn NodeRegistry>>,
+) -> Result<()> {
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
     let mut interval = time::interval(Duration::from_secs(poll_secs));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -45,19 +49,28 @@ pub async fn run(config: Config) -> Result<()> {
             }
         };
 
-        process_due_jobs(&config, &security, jobs, SCHEDULER_COMPONENT).await;
+        process_due_jobs(
+            &config,
+            &security,
+            &node_registry,
+            jobs,
+            SCHEDULER_COMPONENT,
+        )
+        .await;
     }
 }
 
 pub async fn execute_job_now(config: &Config, job: &CronJob) -> (bool, String) {
     let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
-    execute_job_with_retry(config, &security, job).await
+    let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+    execute_job_with_retry(config, &security, job, &node_registry).await
 }
 
 async fn execute_job_with_retry(
     config: &Config,
     security: &SecurityPolicy,
     job: &CronJob,
+    node_registry: &Option<Arc<dyn NodeRegistry>>,
 ) -> (bool, String) {
     let mut last_output = String::new();
     let retries = config.reliability.scheduler_retries;
@@ -66,7 +79,7 @@ async fn execute_job_with_retry(
     for attempt in 0..=retries {
         let (success, output) = match job.job_type {
             JobType::Shell => run_job_command(config, security, job).await,
-            JobType::Agent => run_agent_job(config, security, job).await,
+            JobType::Agent => run_agent_job(config, security, job, node_registry).await,
         };
         last_output = output;
 
@@ -92,6 +105,7 @@ async fn execute_job_with_retry(
 async fn process_due_jobs(
     config: &Config,
     security: &Arc<SecurityPolicy>,
+    node_registry: &Option<Arc<dyn NodeRegistry>>,
     jobs: Vec<CronJob>,
     component: &str,
 ) {
@@ -106,7 +120,14 @@ async fn process_due_jobs(
                 let security = Arc::clone(security);
                 let component = component.to_owned();
                 async move {
-                    execute_and_persist_job(&config, security.as_ref(), &job, &component).await
+                    execute_and_persist_job(
+                        &config,
+                        security.as_ref(),
+                        &node_registry,
+                        &job,
+                        &component,
+                    )
+                    .await
                 }
             }),
         )
@@ -122,6 +143,7 @@ async fn process_due_jobs(
 async fn execute_and_persist_job(
     config: &Config,
     security: &SecurityPolicy,
+    node_registry: &Option<Arc<dyn NodeRegistry>>,
     job: &CronJob,
     component: &str,
 ) -> (String, bool, String) {
@@ -129,7 +151,7 @@ async fn execute_and_persist_job(
     warn_if_high_frequency_agent_job(job);
 
     let started_at = Utc::now();
-    let (success, output) = execute_job_with_retry(config, security, job).await;
+    let (success, output) = execute_job_with_retry(config, security, job, node_registry).await;
     let finished_at = Utc::now();
     let success = persist_job_result(config, job, success, &output, started_at, finished_at).await;
 
@@ -140,6 +162,7 @@ async fn run_agent_job(
     config: &Config,
     security: &SecurityPolicy,
     job: &CronJob,
+    node_registry: &Option<Arc<dyn NodeRegistry>>,
 ) -> (bool, String) {
     if !security.can_act() {
         return (
@@ -175,6 +198,7 @@ async fn run_agent_job(
                 model_override,
                 config.default_temperature,
                 vec![],
+                node_registry.as_ref().map(Arc::clone),
                 false,
             )
             .await
@@ -739,7 +763,9 @@ mod tests {
         .unwrap();
         let job = test_job("sh ./retry-once.sh");
 
-        let (success, output) = execute_job_with_retry(&config, &security, &job).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        let (success, output) =
+            execute_job_with_retry(&config, &security, &job, &node_registry).await;
         assert!(success);
         assert!(output.contains("recovered"));
     }
@@ -754,7 +780,9 @@ mod tests {
 
         let job = test_job("ls always_missing_for_retry_test");
 
-        let (success, output) = execute_job_with_retry(&config, &security, &job).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        let (success, output) =
+            execute_job_with_retry(&config, &security, &job, &node_registry).await;
         assert!(!success);
         assert!(output.contains("always_missing_for_retry_test"));
     }
@@ -772,7 +800,9 @@ mod tests {
         job.prompt = Some("Say hello".into());
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
 
-        let (success, output) = run_agent_job(&config, &security, &job).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        let (success, output) =
+            run_agent_job(&config, &security, &job, &node_registry).await;
         assert!(!success);
         assert!(output.contains("agent job failed:"));
     }
@@ -787,7 +817,9 @@ mod tests {
         job.prompt = Some("Say hello".into());
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
 
-        let (success, output) = run_agent_job(&config, &security, &job).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        let (success, output) =
+            run_agent_job(&config, &security, &job, &node_registry).await;
         assert!(!success);
         assert!(output.contains("blocked by security policy"));
         assert!(output.contains("read-only"));
@@ -803,7 +835,9 @@ mod tests {
         job.prompt = Some("Say hello".into());
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
 
-        let (success, output) = run_agent_job(&config, &security, &job).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        let (success, output) =
+            run_agent_job(&config, &security, &job, &node_registry).await;
         assert!(!success);
         assert!(output.contains("blocked by security policy"));
         assert!(output.contains("rate limit exceeded"));
@@ -820,7 +854,8 @@ mod tests {
         let component = unique_component("scheduler-idle");
 
         crate::health::mark_component_error(&component, "pre-existing error");
-        process_due_jobs(&config, &security, Vec::new(), &component).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        process_due_jobs(&config, &security, &node_registry, Vec::new(), &component).await;
 
         let snapshot = crate::health::snapshot_json();
         let entry = &snapshot["components"][component.as_str()];
@@ -841,7 +876,8 @@ mod tests {
         let component = unique_component("scheduler-fail");
 
         crate::health::mark_component_ok(&component);
-        process_due_jobs(&config, &security, vec![job], &component).await;
+        let node_registry: Option<Arc<dyn NodeRegistry>> = None;
+        process_due_jobs(&config, &security, &node_registry, vec![job], &component).await;
 
         let snapshot = crate::health::snapshot_json();
         let entry = &snapshot["components"][component.as_str()];
