@@ -51,7 +51,7 @@ use uuid::Uuid;
 pub const MAX_BODY_SIZE: usize = 65_536;
 /// Request timeout (30s) — prevents slow-loris attacks
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
-/// `/response` timeout (120s) — allows longer non-streaming agent runs
+/// `/response` timeout (120s) — allows longer agent runs (streaming or non-streaming)
 pub const RESPONSE_TIMEOUT_SECS: u64 = 120;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -655,7 +655,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     println!("  GET  /v1/models — list available models");
     println!("  GET  /api/*     — REST API (bearer token required)");
     println!("  GET  /ws/chat   — WebSocket agent chat");
-    println!("  POST /response  — HTTP agent chat (non-streaming)");
+    println!("  POST /response  — HTTP agent chat (streaming when stream: true)");
     println!("  GET  /health    — health check");
     println!("  GET  /metrics   — Prometheus metrics");
     if let Some(code) = pairing.pairing_code() {

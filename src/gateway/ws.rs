@@ -9,19 +9,30 @@
 //! Server -> Client: {"type":"done","full_response":"..."}
 //! ```
 
+use super::openai_compat::{
+    ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsChoice,
+    ChatCompletionsResponseMessage, ChatCompletionsUsage,
+};
 use super::AppState;
-use crate::agent::loop_::run_tool_call_loop;
+use crate::agent::loop_::{
+    run_tool_call_loop, DRAFT_CLEAR_SENTINEL, DRAFT_PROGRESS_SENTINEL, DRAFT_REASONING_SENTINEL,
+};
 use crate::approval::ApprovalManager;
 use crate::providers::ChatMessage;
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
-use serde::Deserialize;
+use futures_util::stream::unfold;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 const EMPTY_WS_RESPONSE_FALLBACK: &str =
     "Tool execution completed, but the model returned no final text response. Please ask me to summarize the result.";
@@ -112,16 +123,13 @@ fn finalize_ws_response(
     EMPTY_WS_RESPONSE_FALLBACK.to_string()
 }
 
-#[derive(Deserialize)]
-pub struct HttpChatRequest {
-    pub content: String,
-}
-
-/// POST /response — HTTP agent chat (non-streaming, single-turn)
+/// POST /response — HTTP agent chat.
+/// Accepts OpenAI `/v1/chat/completions` format: `{ "messages": [...], "model": "?", "temperature": ?, "stream": ? }`.
+/// When `stream: true`, returns SSE chunks; otherwise returns JSON.
 pub async fn handle_http_response(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<HttpChatRequest>,
+    Json(body): Json<ChatCompletionsRequest>,
 ) -> impl IntoResponse {
     // Auth via Authorization header (same pairing model as WebSocket chat).
     if state.pairing.require_pairing() {
@@ -135,25 +143,40 @@ pub async fn handle_http_response(
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({
-                    "error": "Unauthorized — provide Authorization: Bearer <token>"
+                    "error": {
+                        "message": "Invalid API key. Pair first via POST /pair, then use Authorization: Bearer <token>",
+                        "type": "invalid_request_error",
+                        "code": "invalid_api_key"
+                    }
                 })),
             )
                 .into_response();
         }
     }
 
-    let content = body.content.trim();
-    if content.is_empty() {
+    if body.messages.is_empty() {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "content must not be empty"
+                "error": {
+                    "message": "messages array must not be empty",
+                    "type": "invalid_request_error",
+                    "code": "invalid_messages"
+                }
             })),
         )
             .into_response();
     }
 
-    // Build a fresh, single-turn history (system + user), mirroring WebSocket chat behavior.
+    let model = body
+        .model
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .unwrap_or(&state.model)
+        .to_string();
+    let temperature = body.temperature.unwrap_or(state.temperature);
+
+    // Build history: system prompt + client messages (OpenAI chat completions format).
     let system_prompt = {
         let config_guard = state.config.lock();
         crate::channels::build_system_prompt(
@@ -168,7 +191,12 @@ pub async fn handle_http_response(
 
     let mut history: Vec<ChatMessage> = Vec::new();
     history.push(ChatMessage::system(&system_prompt));
-    history.push(ChatMessage::user(content));
+    for m in &body.messages {
+        history.push(ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        });
+    }
 
     let approval_manager = {
         let config_guard = state.config.lock();
@@ -190,8 +218,23 @@ pub async fn handle_http_response(
     let _ = state.event_tx.send(serde_json::json!({
         "type": "agent_start",
         "provider": provider_label,
-        "model": state.model,
+        "model": model,
     }));
+
+    let stream = body.stream.unwrap_or(false);
+    if stream {
+        return handle_response_stream(
+            state,
+            history,
+            model,
+            temperature,
+            provider_label,
+            approval_manager,
+            excluded_tools,
+        )
+        .await
+        .into_response();
+    }
 
     let result = run_tool_call_loop(
         state.provider.as_ref(),
@@ -199,8 +242,8 @@ pub async fn handle_http_response(
         state.tools_registry_exec.as_ref(),
         state.observer.as_ref(),
         &provider_label,
-        &state.model,
-        state.temperature,
+        &model,
+        temperature,
         true, // silent - no console output
         Some(&approval_manager),
         "httpchat",
@@ -217,19 +260,46 @@ pub async fn handle_http_response(
         Ok(response) => {
             let safe_response =
                 finalize_ws_response(&response, &history, state.tools_registry_exec.as_ref());
+            #[allow(clippy::cast_possible_truncation)]
+            let prompt_tokens = history
+                .iter()
+                .map(|m| m.content.len() / 4)
+                .sum::<usize>() as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let completion_tokens = (safe_response.len() / 4) as u32;
             history.push(ChatMessage::assistant(&safe_response));
 
             // Broadcast agent_end event
             let _ = state.event_tx.send(serde_json::json!({
                 "type": "agent_end",
                 "provider": provider_label,
-                "model": state.model,
+                "model": model,
             }));
 
-            Json(serde_json::json!({
-                "response": safe_response,
-            }))
-            .into_response()
+            let unix_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let response = ChatCompletionsResponse {
+                id: format!("chatcmpl-{}", Uuid::new_v4()),
+                object: "chat.completion",
+                created: unix_ts,
+                model: model.clone(),
+                choices: vec![ChatCompletionsChoice {
+                    index: 0,
+                    message: ChatCompletionsResponseMessage {
+                        role: "assistant",
+                        content: safe_response,
+                    },
+                    finish_reason: "stop",
+                }],
+                usage: ChatCompletionsUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens: prompt_tokens + completion_tokens,
+                },
+            };
+            Json(serde_json::to_value(response).unwrap()).into_response()
         }
         Err(e) => {
             let sanitized = crate::providers::sanitize_api_error(&e.to_string());
@@ -244,7 +314,11 @@ pub async fn handle_http_response(
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
-                    "error": sanitized,
+                    "error": {
+                        "message": sanitized,
+                        "type": "server_error",
+                        "code": "provider_error"
+                    }
                 })),
             )
                 .into_response()
@@ -252,7 +326,169 @@ pub async fn handle_http_response(
     }
 }
 
-/// GET /ws/chat — WebSocket upgrade for agent chat
+enum StreamState {
+    Receiving(mpsc::Receiver<String>, oneshot::Receiver<anyhow::Result<String>>),
+    AwaitingResult(oneshot::Receiver<anyhow::Result<String>>),
+    Done,
+}
+
+/// SSE streaming for POST /response when stream: true.
+async fn handle_response_stream(
+    state: AppState,
+    mut history: Vec<ChatMessage>,
+    model: String,
+    temperature: f64,
+    provider_label: String,
+    approval_manager: ApprovalManager,
+    excluded_tools: Vec<String>,
+) -> impl IntoResponse {
+    let (delta_tx, delta_rx) = mpsc::channel::<String>(64);
+    let (result_tx, result_rx) = oneshot::channel();
+    let state_for_loop = state.clone();
+    let provider_label_ev = provider_label.clone();
+    let model_ev = model.clone();
+
+    tokio::spawn(async move {
+        let result = run_tool_call_loop(
+            state_for_loop.provider.as_ref(),
+            &mut history,
+            state_for_loop.tools_registry_exec.as_ref(),
+            state_for_loop.observer.as_ref(),
+            &provider_label,
+            &model,
+            temperature,
+            true,
+            Some(&approval_manager),
+            "httpchat",
+            &state_for_loop.multimodal,
+            state_for_loop.max_tool_iterations,
+            None,
+            Some(delta_tx),
+            None,
+            &excluded_tools,
+        )
+        .await;
+        let _ = result_tx.send(result);
+    });
+
+    let request_id = Arc::new(format!("chatcmpl-{}", Uuid::new_v4()));
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let model_for_stream = Arc::new(model_ev.clone());
+    let event_tx = state.event_tx.clone();
+
+    let first_chunk = Arc::new(AtomicBool::new(true));
+    let sse_stream = unfold(
+        StreamState::Receiving(delta_rx, result_rx),
+        move |st| {
+            let event_tx = event_tx.clone();
+            let provider_label_ev = provider_label_ev.clone();
+            let model_ev = model_ev.clone();
+            let model_for_stream = Arc::clone(&model_for_stream);
+            let request_id = Arc::clone(&request_id);
+            let first_chunk = Arc::clone(&first_chunk);
+            async move {
+                match st {
+                    StreamState::Receiving(mut rx, result_rx) => {
+                        loop {
+                            match rx.recv().await {
+                                Some(delta) => {
+                                    if delta == DRAFT_CLEAR_SENTINEL {
+                                        continue;
+                                    }
+                                    // Reasoning content: emit as separate delta segment.
+                                    let (is_reasoning, content) = if let Some(rc) =
+                                        delta.strip_prefix(DRAFT_REASONING_SENTINEL)
+                                    {
+                                        (true, rc)
+                                    } else {
+                                        (false, delta
+                                            .strip_prefix(DRAFT_PROGRESS_SENTINEL)
+                                            .unwrap_or(delta.as_str()))
+                                    };
+                                    if content.is_empty() {
+                                        continue;
+                                    }
+                                    let role = if first_chunk.swap(false, Ordering::Relaxed) {
+                                        Some("assistant")
+                                    } else {
+                                        None
+                                    };
+                                    let delta_obj = if is_reasoning {
+                                        serde_json::json!({
+                                            "reasoning_content": content,
+                                        })
+                                    } else {
+                                        serde_json::json!({
+                                            "role": role,
+                                            "content": content,
+                                        })
+                                    };
+                                    let chunk_json = serde_json::json!({
+                                        "id": request_id.as_str(),
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model_for_stream.as_str(),
+                                        "choices": [{
+                                            "index": 0u32,
+                                            "delta": delta_obj,
+                                            "finish_reason": serde_json::Value::Null,
+                                        }],
+                                    });
+                                    let line = format!("data: {}\n\n", chunk_json);
+                                    let bytes = axum::body::Bytes::from(line);
+                                    return Some((
+                                        Ok::<_, std::io::Error>(bytes),
+                                        StreamState::Receiving(rx, result_rx),
+                                    ));
+                                }
+                                None => break,
+                            }
+                        }
+                        Some((
+                            Ok(axum::body::Bytes::from("data: [DONE]\n\n")),
+                            StreamState::AwaitingResult(result_rx),
+                        ))
+                    }
+                    StreamState::AwaitingResult(result_rx) => {
+                        match result_rx.await {
+                            Ok(Ok(_)) => {
+                                let _ = event_tx.send(serde_json::json!({
+                                    "type": "agent_end",
+                                    "provider": provider_label_ev,
+                                    "model": model_ev,
+                                }));
+                            }
+                            Ok(Err(e)) => {
+                                let sanitized =
+                                    crate::providers::sanitize_api_error(&e.to_string());
+                                let _ = event_tx.send(serde_json::json!({
+                                    "type": "error",
+                                    "component": "http_chat",
+                                    "message": sanitized,
+                                }));
+                            }
+                            Err(_) => {}
+                        }
+                        None
+                    }
+                    StreamState::Done => None,
+                }
+            }
+        },
+    );
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(sse_stream))
+        .unwrap()
+        .into_response()
+}
 pub async fn handle_ws_chat(
     State(state): State<AppState>,
     headers: HeaderMap,

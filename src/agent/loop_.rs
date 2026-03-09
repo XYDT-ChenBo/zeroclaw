@@ -42,9 +42,6 @@ use parsing::{
     parse_tool_calls, parse_tool_calls_from_json_value, tool_call_signature, ParsedToolCall,
 };
 
-/// Minimum characters per chunk when relaying LLM text to a streaming draft.
-const STREAM_CHUNK_MIN_CHARS: usize = 80;
-
 /// Default maximum agentic tool-use iterations per user message to prevent runaway loops.
 /// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 20;
@@ -122,6 +119,9 @@ pub(crate) const DRAFT_CLEAR_SENTINEL: &str = "\x00CLEAR\x00";
 /// Channel layers can suppress these messages by default and only expose them
 /// when the user explicitly asks for command/tool execution details.
 pub(crate) const DRAFT_PROGRESS_SENTINEL: &str = "\x00PROGRESS\x00";
+/// Sentinel prefix for model reasoning/thinking content (from reasoning_content).
+/// Emitted as a separate SSE delta segment when streaming.
+pub(crate) const DRAFT_REASONING_SENTINEL: &str = "\x00REASONING\x00";
 
 tokio::task_local! {
     static TOOL_LOOP_REPLY_TARGET: Option<String>;
@@ -716,7 +716,7 @@ pub(crate) async fn run_tool_call_loop(
             chat_future.await
         };
 
-        let (response_text, parsed_text, tool_calls, assistant_history_content, native_tool_calls) =
+        let (response_text, parsed_text, tool_calls, assistant_history_content, native_tool_calls, reasoning_content) =
             match chat_result {
                 Ok(resp) => {
                     let (resp_input_tokens, resp_output_tokens) = resp
@@ -819,6 +819,7 @@ pub(crate) async fn run_tool_call_loop(
                         calls,
                         assistant_history_content,
                         native_calls,
+                        reasoning_content,
                     )
                 }
                 Err(e) => {
@@ -868,6 +869,40 @@ pub(crate) async fn run_tool_call_loop(
             }
         }
 
+        // Stream reasoning_content (model thinking) as a separate segment when present.
+        if let (Some(ref tx), Some(ref rc)) = (on_delta.as_ref(), reasoning_content.as_ref()) {
+            if !rc.trim().is_empty() {
+                if cancellation_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    return Err(ToolLoopCancelled.into());
+                }
+                let _ = tx
+                    .send(format!("{DRAFT_REASONING_SENTINEL}{rc}"))
+                    .await;
+            }
+        }
+
+        // Stream this turn's complete response via on_delta (every turn, not just final).
+        // Each model interaction yields one streaming event — simple turn-level streaming.
+        if !display_text.is_empty() {
+            if let Some(ref tx) = on_delta {
+                if cancellation_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    return Err(ToolLoopCancelled.into());
+                }
+                // For final response, clear accumulated progress before streaming.
+                if tool_calls.is_empty() {
+                    let _ = tx.send(DRAFT_CLEAR_SENTINEL.to_string()).await;
+                }
+                // One send per turn: full display_text as one streaming event.
+                let _ = tx.send(display_text.clone()).await;
+            }
+        }
+
         if tool_calls.is_empty() {
             runtime_trace::record_event(
                 "turn_final_response",
@@ -882,33 +917,6 @@ pub(crate) async fn run_tool_call_loop(
                     "text": scrub_credentials(&display_text),
                 }),
             );
-            // No tool calls — this is the final response.
-            // If a streaming sender is provided, relay the text in small chunks
-            // so the channel can progressively update the draft message.
-            if let Some(ref tx) = on_delta {
-                // Clear accumulated progress lines before streaming the final answer.
-                let _ = tx.send(DRAFT_CLEAR_SENTINEL.to_string()).await;
-                // Split on whitespace boundaries, accumulating chunks of at least
-                // STREAM_CHUNK_MIN_CHARS characters for progressive draft updates.
-                let mut chunk = String::new();
-                for word in display_text.split_inclusive(char::is_whitespace) {
-                    if cancellation_token
-                        .as_ref()
-                        .is_some_and(CancellationToken::is_cancelled)
-                    {
-                        return Err(ToolLoopCancelled.into());
-                    }
-                    chunk.push_str(word);
-                    if chunk.len() >= STREAM_CHUNK_MIN_CHARS
-                        && tx.send(std::mem::take(&mut chunk)).await.is_err()
-                    {
-                        break; // receiver dropped
-                    }
-                }
-                if !chunk.is_empty() {
-                    let _ = tx.send(chunk).await;
-                }
-            }
             history.push(ChatMessage::assistant(response_text.clone()));
             return Ok(display_text);
         }
@@ -917,6 +925,18 @@ pub(crate) async fn run_tool_call_loop(
         if !silent && !display_text.is_empty() {
             print!("{display_text}");
             let _ = std::io::stdout().flush();
+        }
+
+        // Stream tool call info via on_delta so clients see which tools are invoked.
+        if let Some(ref tx) = on_delta {
+            for call in &tool_calls {
+                let args_preview = truncate_with_ellipsis(
+                    &scrub_credentials(&call.arguments.to_string()),
+                    120,
+                );
+                let info = format!("🔧 Invoking {}: {}\n", call.name, args_preview);
+                let _ = tx.send(info).await;
+            }
         }
 
         // Execute tool calls and build results. `individual_results` tracks per-call output so

@@ -9,6 +9,9 @@
 //! - Node replies:
 //!     req   {type:"req",id,method:"node.invoke.result",params:{id,nodeId,ok,payload?,payloadJSON?,error?}}
 //! - Results are bridged back into [`NodeCommandResult`] for the `nodes` tool and HTTP APIs.
+//!
+//! WebSocket connection is tuned for large payloads (e.g. camera_snap base64 images): larger
+//! read/write buffers improve throughput; explicit max message/frame sizes avoid silent rejection.
 
 use super::node_registry::OutgoingMessage;
 use super::AppState;
@@ -24,6 +27,17 @@ use axum::{
 use serde_json::Value;
 use std::net::SocketAddr;
 use uuid::Uuid;
+
+/// Read buffer size for node WebSocket (default 128 KiB). Larger values improve receive throughput for large messages (e.g. base64 images).
+const WS_NODE_READ_BUFFER_SIZE: usize = 1024 * 1024;
+/// Write buffer size for node WebSocket (default 128 KiB). Larger values reduce syscalls when sending.
+const WS_NODE_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
+/// Max size of a single WebSocket message (e.g. invoke result with base64 image). Must allow multi-MB payloads.
+const WS_NODE_MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+/// Max size of a single WebSocket frame. Should be at least as large as typical message for unfragmented handling.
+const WS_NODE_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+/// Max write buffer before backpressure. Should be >= write_buffer_size + one typical large message.
+const WS_NODE_MAX_WRITE_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 fn sanitize_ws_headers(headers: &HeaderMap) -> Value {
     let mut out = serde_json::Map::new();
@@ -89,7 +103,12 @@ pub async fn handle_ws_node(
     }
 
     tracing::info!(peer = %peer_addr, "node websocket upgrade accepted");
-    ws.on_upgrade(move |socket| handle_node_socket(socket, registry, peer_addr))
+    ws.read_buffer_size(WS_NODE_READ_BUFFER_SIZE)
+        .write_buffer_size(WS_NODE_WRITE_BUFFER_SIZE)
+        .max_message_size(WS_NODE_MAX_MESSAGE_SIZE)
+        .max_frame_size(WS_NODE_MAX_FRAME_SIZE)
+        .max_write_buffer_size(WS_NODE_MAX_WRITE_BUFFER_SIZE)
+        .on_upgrade(move |socket| handle_node_socket(socket, registry, peer_addr))
         .into_response()
 }
 
