@@ -78,6 +78,7 @@ pub mod node_capabilities;
 pub mod node_tool;
 pub mod notion_tool;
 pub mod opencode_cli;
+pub mod nodes;
 pub mod pdf_read;
 pub mod pipeline;
 pub mod poll;
@@ -175,6 +176,7 @@ pub use model_switch::ModelSwitchTool;
 pub use node_tool::NodeTool;
 pub use notion_tool::NotionTool;
 pub use opencode_cli::OpenCodeCliTool;
+pub use nodes::{NodeCommandResult, NodeDescription, NodeInfo, NodeRegistry, NodesTool};
 pub use pdf_read::PdfReadTool;
 pub use poll::{ChannelMapHandle, PollTool};
 pub use project_intel::ProjectIntelTool;
@@ -215,6 +217,7 @@ use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::{create_sandbox, SecurityPolicy};
+use crate::_nodes::ConnectedNodeRegistry;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -499,7 +502,13 @@ pub fn all_tools_with_runtime(
         tool_arcs.push(Arc::new(ReadSkillTool::new(
             workspace_dir.to_path_buf(),
             root_config.skills.open_skills_enabled,
-            root_config.skills.open_skills_dir.clone(),
+            root_config.skills.open_skills_dir.clone())));
+    }
+
+    if config.gateway.node_control.enabled {
+        tool_arcs.push(Arc::new(NodesTool::new(
+            ConnectedNodeRegistry::global(),
+            workspace_dir,
         )));
     }
 

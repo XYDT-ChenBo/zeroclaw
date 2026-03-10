@@ -21,7 +21,7 @@ pub mod sse;
 pub mod static_files;
 pub mod tls;
 pub mod ws;
-
+use super::_nodes::handle_ws_node;
 use crate::channels::{
     session_backend::SessionBackend, session_sqlite::SqliteSessionBackend, Channel,
     GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
@@ -1002,20 +1002,22 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let inner = inner
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
-        // ── WebSocket agent chat ──
+        // ── WebSocket chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
         // ── WebSocket canvas updates ──
         .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas))
         // ── WebSocket node discovery ──
         .route("/ws/nodes", get(nodes::handle_ws_nodes))
+        // ── WebSocket node connections (when node_control.enabled) ──
+        .route("/", get(handle_ws_node))
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
         .merge(config_put_router)
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback))
-        .with_state(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
+        .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(gateway_request_timeout_secs()),
@@ -1311,7 +1313,7 @@ async fn run_gateway_chat_with_tools(
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    Box::pin(crate::agent::process_message(config, message, session_id)).await
+    Box::pin(crate::agent::process_message(config, message,  session_id)).await
 }
 
 /// Webhook request body
@@ -2883,9 +2885,6 @@ mod tests {
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
-
-        let headers = HeaderMap::new();
-
         let body1 = Ok(Json(WebhookBody {
             message: "hello one".into(),
         }));
