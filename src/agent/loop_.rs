@@ -2439,7 +2439,7 @@ async fn consume_provider_streaming_response(
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
-/// When `silent` is true, suppresses stdout (for channel use).
+/// When `silent` is true, suppresses stdout (for channel or non-CLI use).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn agent_turn(
     provider: &dyn Provider,
@@ -2459,6 +2459,7 @@ pub(crate) async fn agent_turn(
     dedup_exempt_tools: &[String],
     activated_tools: Option<&std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
     model_switch_callback: Option<ModelSwitchCallback>,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -2475,7 +2476,7 @@ pub(crate) async fn agent_turn(
         multimodal_config,
         max_tool_iterations,
         None,
-        None,
+        on_delta,
         None,
         excluded_tools,
         dedup_exempt_tools,
@@ -2967,7 +2968,7 @@ pub(crate) async fn run_tool_call_loop(
 
         // Unified path via Provider::chat so provider-specific native tool logic
         // (OpenAI/Anthropic/OpenRouter/compatible adapters) is honored.
-        let request_tools = if use_native_tools {
+        let request_tools = if !tool_specs.is_empty() {
             Some(tool_specs.as_slice())
         } else {
             None
@@ -4146,6 +4147,17 @@ pub async fn run(
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
     }
+
+    // For non-CLI callers (daemon / cron / gateway-style runs), apply the
+    // non_cli_excluded_tools allowlist so these tools are neither advertised
+    // in the system prompt nor callable at runtime.
+    if !interactive {
+        let excluded = &config.autonomy.non_cli_excluded_tools;
+        if !excluded.is_empty() {
+            tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
+        }
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -4672,7 +4684,20 @@ pub async fn run(
 pub async fn process_message(
     config: Config,
     message: &str,
+    extra_tools: Option<Vec<Box<dyn Tool>>>,
+    session_id: Option<&str>
+) -> Result<String> {
+    process_message_with_stream(config, message, session_id, extra_tools, None).await
+}
+
+/// 与 `process_message` 相同，但允许将 agent 的终局回答通过 `on_delta` 渠道
+/// 流式输出（复用工具循环中的 streaming sender 机制）。
+pub async fn process_message_with_stream(
+    config: Config,
+    message: &str,
     session_id: Option<&str>,
+    extra_tools: Option<Vec<Box<dyn Tool>>>,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
@@ -4790,6 +4815,9 @@ pub async fn process_message(
                 tracing::error!("MCP registry failed to initialize: {e:#}");
             }
         }
+    }
+    if let Some(mut extra) = extra_tools {
+        tools_registry.append(&mut extra);
     }
 
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
@@ -5007,6 +5035,7 @@ pub async fn process_message(
         &config.agent.tool_call_dedup_exempt,
         activated_handle_pm.as_ref(),
         None,
+        on_delta,
     )
     .await
 }
