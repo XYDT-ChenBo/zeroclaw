@@ -1773,6 +1773,34 @@ pub struct GatewayConfig {
     /// Pairing dashboard configuration
     #[serde(default)]
     pub pairing_dashboard: PairingDashboardConfig,
+    /// Enable node control (WebSocket nodes + nodes tool)
+    #[serde(default)]
+    pub node_control: NodeControlConfig,
+}
+
+/// Node control configuration (`[gateway.node_control]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NodeControlConfig {
+    /// Enable node control (WebSocket nodes + nodes tool)
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allowed node IDs for node control
+    #[serde(default)]
+    pub allowed_node_ids: Vec<String>,
+    /// Optional shared secret for node-control HTTP/WebSocket APIs.
+    /// When set, inbound requests must include `X-Node-Control-Token`.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+impl Default for NodeControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_node_ids: Vec::new(),
+            auth_token: None,
+        }
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -1829,6 +1857,7 @@ impl Default for GatewayConfig {
             session_persistence: true,
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
+            node_control: NodeControlConfig::default(),
         }
     }
 }
