@@ -2113,7 +2113,7 @@ async fn consume_provider_streaming_response(
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
-/// When `silent` is true, suppresses stdout (for channel use).
+/// When `silent` is true, suppresses stdout (for channel or non-CLI use).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn agent_turn(
     provider: &dyn Provider,
@@ -2133,6 +2133,7 @@ pub(crate) async fn agent_turn(
     dedup_exempt_tools: &[String],
     activated_tools: Option<&std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
     model_switch_callback: Option<ModelSwitchCallback>,
+    on_delta: Option<tokio::sync::mpsc::Sender<DraftEvent>>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -2149,7 +2150,7 @@ pub(crate) async fn agent_turn(
         multimodal_config,
         max_tool_iterations,
         None,
-        None,
+        on_delta,
         None,
         excluded_tools,
         dedup_exempt_tools,
@@ -2521,7 +2522,7 @@ pub(crate) async fn run_tool_call_loop(
 
         // Unified path via Provider::chat so provider-specific native tool logic
         // (OpenAI/Anthropic/OpenRouter/compatible adapters) is honored.
-        let request_tools = if use_native_tools {
+        let request_tools = if !tool_specs.is_empty() {
             Some(tool_specs.as_slice())
         } else {
             None
@@ -3814,6 +3815,17 @@ pub async fn run(
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
     }
+
+    // For non-CLI callers (daemon / cron / gateway-style runs), apply the
+    // non_cli_excluded_tools allowlist so these tools are neither advertised
+    // in the system prompt nor callable at runtime.
+    if !interactive {
+        let excluded = &config.autonomy.non_cli_excluded_tools;
+        if !excluded.is_empty() {
+            tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
+        }
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -4454,7 +4466,7 @@ pub async fn run(
 pub async fn process_message(
     config: Config,
     message: &str,
-    session_id: Option<&str>,
+    session_id: Option<&str>
 ) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
@@ -4789,6 +4801,7 @@ pub async fn process_message(
         &excluded_tools,
         &config.agent.tool_call_dedup_exempt,
         activated_handle_pm.as_ref(),
+        None,
         None,
     )
     .await
