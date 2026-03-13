@@ -16,7 +16,6 @@
 
 pub mod clawdtalk;
 pub mod cli;
-pub mod http;
 pub mod dingtalk;
 pub mod discord;
 pub mod email_channel;
@@ -47,7 +46,6 @@ pub mod whatsapp_web;
 
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
-pub use http::HttpChannel;
 pub use dingtalk::DingTalkChannel;
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
@@ -86,7 +84,7 @@ use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -164,11 +162,6 @@ const MAX_CHANNEL_HISTORY: usize = 50;
 /// Messages shorter than this (e.g. "ok", "thanks") are not stored,
 /// reducing noise in memory recall.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedHistory {
-    turns: Vec<ChatMessage>,
-}
 
 /// Maximum characters per injected workspace file (matches `OpenClaw` default).
 const BOOTSTRAP_MAX_CHARS: usize = 20_000;
@@ -348,81 +341,6 @@ fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
         Some(tid) => format!("{}_{}_{}", msg.channel, tid, msg.sender),
         None => format!("{}_{}", msg.channel, msg.sender),
     }
-}
-
-fn session_file_path(ctx: &ChannelRuntimeContext, session_id: &str) -> PathBuf {
-    ctx.workspace_dir
-        .join("sessions")
-        .join(format!("{session_id}.json"))
-}
-
-fn try_load_history_for_session(
-    ctx: &ChannelRuntimeContext,
-    history_key: &str,
-    session_id: &str,
-) {
-    let path = session_file_path(ctx, session_id);
-    if !path.is_file() {
-        return;
-    }
-
-    let file = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(%session_id, ?e, "failed to open session history file");
-            return;
-        }
-    };
-
-    let persisted: PersistedHistory = match serde_json::from_reader(std::io::BufReader::new(file)) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(%session_id, ?e, "failed to deserialize session history file");
-            return;
-        }
-    };
-
-    let mut turns = normalize_cached_channel_turns(persisted.turns);
-    if turns.len() > MAX_CHANNEL_HISTORY {
-        let keep_from = turns.len().saturating_sub(MAX_CHANNEL_HISTORY);
-        turns = turns[keep_from..].to_vec();
-    }
-
-    let mut histories = ctx
-        .conversation_histories
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    histories.insert(history_key.to_string(), turns);
-}
-
-fn flush_history_for_session(
-    ctx: &ChannelRuntimeContext,
-    history_key: &str,
-    session_id: &str,
-) -> anyhow::Result<()> {
-    let turns = {
-        let histories = ctx
-            .conversation_histories
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match histories.get(history_key) {
-            Some(t) => t.clone(),
-            None => return Ok(()),
-        }
-    };
-
-    let sessions_dir = ctx.workspace_dir.join("sessions");
-    std::fs::create_dir_all(&sessions_dir)
-        .with_context(|| format!("failed to create sessions dir at {:?}", sessions_dir))?;
-
-    let path = session_file_path(ctx, session_id);
-    let file = std::fs::File::create(&path)
-        .with_context(|| format!("failed to create session file at {:?}", path))?;
-    let writer = std::io::BufWriter::new(file);
-    let data = PersistedHistory { turns };
-    serde_json::to_writer_pretty(writer, &data)
-        .with_context(|| format!("failed to write session history to {:?}", path))?;
-    Ok(())
 }
 
 fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
@@ -1783,12 +1701,6 @@ async fn process_channel_message(
     }
 
     let history_key = conversation_history_key(&msg);
-    // HTTP 通道：sender 即为 session_id（参见 _nodes/response.rs），用于跨重启恢复会话历史。
-    let session_id_opt = if msg.channel == "http" {
-        Some(msg.sender.clone())
-    } else {
-        None
-    };
     let route = get_route_selection(ctx.as_ref(), &history_key);
     let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
     let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
@@ -1832,13 +1744,6 @@ async fn process_channel_message(
         .unwrap_or_else(|e| e.into_inner())
         .get(&history_key)
         .is_some_and(|turns| !turns.is_empty());
-
-    // 如果当前内存中没有历史，但存在 session_id，则尝试从 sessions 目录加载。
-    if !had_prior_history {
-        if let Some(session_id) = session_id_opt.as_deref() {
-            try_load_history_for_session(ctx.as_ref(), &history_key, session_id);
-        }
-    }
 
     // Preserve user turn before the LLM call so interrupted requests keep context.
     append_sender_turn(ctx.as_ref(), &history_key, ChatMessage::user(&msg.content));
@@ -2181,11 +2086,6 @@ async fn process_channel_message(
                 &history_key,
                 ChatMessage::assistant(&history_response),
             );
-            if let Some(session_id) = session_id_opt.as_deref() {
-                if let Err(e) = flush_history_for_session(ctx.as_ref(), &history_key, session_id) {
-                    tracing::warn!(%session_id, "failed to flush session history: {e}");
-                }
-            }
             println!(
                 "  🤖 Reply ({}ms): {}",
                 started_at.elapsed().as_millis(),
@@ -3153,14 +3053,6 @@ fn collect_configured_channels(
         });
     }
 
-    // HTTP virtual channel — enabled by `[channels_config] http = true`.
-    if config.channels_config.http {
-        channels.push(ConfiguredChannel {
-            display_name: "HTTP",
-            channel: Arc::new(HttpChannel::new()),
-        });
-    }
-
     if let Some(ref wa) = config.channels_config.whatsapp {
         if wa.is_ambiguous_config() {
             tracing::warn!(
@@ -3591,11 +3483,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
             .map(|configured| configured.channel)
             .collect();
 
-    // Always register HTTP channel so `/response` can reuse the channel pipeline
-    // when the daemon is running.
-    channels.push(Arc::new(HttpChannel::new()));
-
-    #[cfg(feature = "channel-nostr")]
     if let Some(ref ns) = config.channels_config.nostr {
         channels.push(Arc::new(
             NostrChannel::new(&ns.private_key, ns.relays.clone(), &ns.allowed_pubkeys).await?,

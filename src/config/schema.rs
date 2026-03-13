@@ -2828,10 +2828,6 @@ impl<T: ChannelConfig> crate::config::traits::ConfigHandle for ConfigWrapper<T> 
 pub struct ChannelsConfig {
     /// Enable the CLI interactive channel. Default: `true`.
     pub cli: bool,
-    /// Enable the HTTP virtual channel used by `/response` to reuse the
-    /// channel pipeline (conversation history + memory). Default: `false`.
-    #[serde(default)]
-    pub http: bool,
     /// Telegram bot channel configuration.
     pub telegram: Option<TelegramConfig>,
     /// Discord bot channel configuration.
@@ -2885,7 +2881,7 @@ impl ChannelsConfig {
     /// get channels' metadata and `.is_some()`, except webhook
     #[rustfmt::skip]
     pub fn channels_except_webhook(&self) -> Vec<(Box<dyn super::traits::ConfigHandle>, bool)> {
-        let mut v: Vec<(Box<dyn super::traits::ConfigHandle>, bool)> = vec![
+        vec![
             (
                 Box::new(ConfigWrapper::new(self.telegram.as_ref())),
                 self.telegram.is_some(),
@@ -2963,19 +2959,7 @@ impl ChannelsConfig {
                 Box::new(ConfigWrapper::new(self.clawdtalk.as_ref())),
                 self.clawdtalk.is_some(),
             ),
-        ];
-
-        // HTTP virtual channel — configuration is a simple boolean; for the
-        // purposes of `channels_config.channels()` and `has_supervised_channels`
-        // we only care about the bool flag, so we re-use the TelegramConfig
-        // handle type here. This keeps the existing `ConfigHandle` abstraction
-        // unchanged while allowing `http` to participate in channel presence.
-        v.push((
-            Box::new(ConfigWrapper::new(self.telegram.as_ref())),
-            self.http,
-        ));
-
-        v
+        ]
     }
 
     pub fn channels(&self) -> Vec<(Box<dyn super::traits::ConfigHandle>, bool)> {
@@ -2996,7 +2980,6 @@ impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
             cli: true,
-            http: true,
             telegram: None,
             discord: None,
             slack: None,

@@ -15,6 +15,7 @@ use regex::{Regex, RegexSet};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::io::Write as _;
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -115,6 +116,9 @@ pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
 /// Used before streaming the final answer so progress lines are replaced by the clean response.
 pub(crate) const DRAFT_CLEAR_SENTINEL: &str = "\x00CLEAR\x00";
 
+/// Filename for persisted session conversation history under sessions/{session_id}/.
+const SESSION_HISTORY_FILENAME: &str = "history_conversation.json";
+
 /// Extract a short hint from tool call arguments for progress display.
 fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len: usize) -> String {
     let hint = match name {
@@ -150,6 +154,52 @@ fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<serde_json::V
 
 fn autosave_memory_key(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
+}
+
+/// Session ID must be path-safe (alphanumeric, hyphen, underscore, no path traversal).
+fn is_safe_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.contains("..")
+        && !s.contains('/')
+        && !s.contains('\\')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Load prior conversation history from sessions/{session_id}/history_conversation.json.
+/// Returns at most `max_history_messages` most recent messages (no system). Empty on missing/error.
+fn load_session_history(
+    workspace_dir: &Path,
+    session_id: &str,
+    max_history_messages: usize,
+) -> Vec<ChatMessage> {
+    let path = workspace_dir
+        .join("sessions")
+        .join(session_id)
+        .join(SESSION_HISTORY_FILENAME);
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+    let mut prior: Vec<ChatMessage> = serde_json::from_str(&data).unwrap_or_default();
+    if prior.len() > max_history_messages {
+        prior.drain(..prior.len() - max_history_messages);
+    }
+    prior
+}
+
+/// Save conversation history to sessions/{session_id}/history_conversation.json.
+fn save_session_history(
+    workspace_dir: &Path,
+    session_id: &str,
+    history: &[ChatMessage],
+) -> Result<()> {
+    let dir = workspace_dir.join("sessions").join(session_id);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(SESSION_HISTORY_FILENAME);
+    let data = serde_json::to_string_pretty(history)?;
+    std::fs::write(path, data)?;
+    Ok(())
 }
 
 /// Trim conversation history to prevent unbounded growth.
@@ -3332,21 +3382,27 @@ pub async fn run(
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
 /// `extra_tools` can be used by callers (for example, the HTTP gateway) to inject
 /// additional tools such as the `nodes` tool backed by a shared registry.
+/// When `session_id` is set, history is loaded from and saved to
+/// workspace/sessions/{session_id}/history_conversation.json for conversation continuity.
 pub async fn process_message(
     config: Config,
     message: &str,
     extra_tools: Option<Vec<Box<dyn Tool>>>,
+    session_id: Option<&str>,
 ) -> Result<String> {
-    process_message_with_stream(config, message, extra_tools, None).await
+    process_message_with_stream(config, message, extra_tools, None, session_id).await
 }
 
 /// 与 `process_message` 相同，但允许将 agent 的终局回答通过 `on_delta` 渠道
 /// 流式输出（复用工具循环中的 streaming sender 机制）。
+/// When `session_id` is set, history is loaded from and saved to
+/// workspace/sessions/{session_id}/history_conversation.json for conversation continuity.
 pub async fn process_message_with_stream(
     config: Config,
     message: &str,
     extra_tools: Option<Vec<Box<dyn Tool>>>,
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
+    session_id: Option<&str>,
 ) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
@@ -3520,12 +3576,28 @@ pub async fn process_message_with_stream(
         format!("{context}[{now}] {message}")
     };
 
-    let mut history = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user(&enriched),
-    ];
+    let mut history = if let Some(sid) = session_id.filter(|s| is_safe_session_id(s)) {
+        let prior = load_session_history(
+            &config.workspace_dir,
+            sid,
+            config.agent.max_history_messages,
+        );
+        let mut h: Vec<ChatMessage> = prior
+            .into_iter()
+            .skip_while(|m| m.role == "system")
+            .collect();
+        h.insert(0, ChatMessage::system(&system_prompt));
+        h.push(ChatMessage::user(&enriched));
+        trim_history(&mut h, config.agent.max_history_messages);
+        h
+    } else {
+        vec![
+            ChatMessage::system(&system_prompt),
+            ChatMessage::user(&enriched),
+        ]
+    };
 
-    agent_turn(
+    let result = agent_turn(
         provider.as_ref(),
         &mut history,
         &tools_registry,
@@ -3539,7 +3611,19 @@ pub async fn process_message_with_stream(
         &config.autonomy.non_cli_excluded_tools,
         on_delta,
     )
-    .await
+    .await?;
+
+    if let Some(sid) = session_id.filter(|s| is_safe_session_id(s)) {
+        trim_history(&mut history, config.agent.max_history_messages);
+        let to_save: Vec<ChatMessage> = history
+            .iter()
+            .filter(|m| m.role != "system")
+            .cloned()
+            .collect();
+        let _ = save_session_history(&config.workspace_dir, sid, &to_save);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
