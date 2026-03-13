@@ -16,6 +16,7 @@
 
 pub mod clawdtalk;
 pub mod cli;
+pub mod bot_service;
 pub mod dingtalk;
 pub mod discord;
 pub mod email_channel;
@@ -46,6 +47,7 @@ pub mod whatsapp_web;
 
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
+pub use bot_service::BotServiceChannel;
 pub use dingtalk::DingTalkChannel;
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
@@ -1693,6 +1695,13 @@ async fn process_channel_message(
     };
 
     let target_channel = ctx.channels_by_name.get(&msg.channel).cloned();
+    if target_channel.is_none() {
+        tracing::warn!(
+            channel = %msg.channel,
+            available = ?ctx.channels_by_name.keys().collect::<Vec<_>>(),
+            "No channel handle for reply delivery; reply will not be sent"
+        );
+    }
     if let Err(err) = maybe_apply_runtime_config_update(ctx.as_ref()).await {
         tracing::warn!("Failed to apply runtime config update: {err}");
     }
@@ -2091,19 +2100,33 @@ async fn process_channel_message(
                 started_at.elapsed().as_millis(),
                 truncate_with_ellipsis(&delivered_response, 80)
             );
-            if let Some(channel) = target_channel.as_ref() {
-                if let Some(ref draft_id) = draft_message_id {
+            match target_channel.as_ref() {
+                Some(channel) => {
+                    tracing::info!(
+                        channel = %msg.channel,
+                        channel_impl = %channel.name(),
+                        to = %msg.reply_target,
+                        "Delivering reply to channel"
+                    );
+                    if let Some(ref draft_id) = draft_message_id {
                     if let Err(e) = channel
                         .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
                         .await
                     {
                         tracing::warn!("Failed to finalize draft: {e}; sending as new message");
-                        let _ = channel
+                        let result = channel
                             .send(
                                 &SendMessage::new(&delivered_response, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
                             )
                             .await;
+                        if let Err(err) = result {
+                            tracing::warn!(
+                                channel = %msg.channel,
+                                channel_impl = %channel.name(),
+                                "Reply send failed after draft finalize failure: {err}"
+                            );
+                        }
                     }
                 } else if let Err(e) = channel
                     .send(
@@ -2113,6 +2136,13 @@ async fn process_channel_message(
                     .await
                 {
                     eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
+                }
+                }
+                None => {
+                    tracing::warn!(
+                        channel = %msg.channel,
+                        "Reply not sent: no channel handle for delivery"
+                    );
                 }
             }
         }
@@ -3051,6 +3081,20 @@ fn collect_configured_channels(
                 sig.ignore_stories,
             )),
         });
+    }
+
+    if let Some(ref bs) = config.channels_config.bot_service {
+        if bs.ws_url.trim().is_empty() {
+            tracing::warn!(
+                target: "bot_service",
+                "BotService channel configured but ws_url is empty; skipping"
+            );
+        } else {
+            channels.push(ConfiguredChannel {
+                display_name: "BotService",
+                channel: Arc::new(BotServiceChannel::new(bs.clone())),
+            });
+        }
     }
 
     if let Some(ref wa) = config.channels_config.whatsapp {
