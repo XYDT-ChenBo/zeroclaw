@@ -262,6 +262,8 @@ pub enum DraftEvent {
 tokio::task_local! {
     pub(crate) static TOOL_CHOICE_OVERRIDE: Option<String>;
 }
+/// Filename for persisted session conversation history under sessions/{session_id}/.
+const SESSION_HISTORY_FILENAME: &str = "history_conversation.json";
 
 /// Convert a tool registry to OpenAI function-calling format for native tool support.
 fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<serde_json::Value> {
@@ -4757,6 +4759,7 @@ pub async fn process_message(
         ChatMessage::system(&system_prompt),
         ChatMessage::user(&enriched),
     ];
+
     let mut excluded_tools = compute_excluded_mcp_tools(
         &tools_registry,
         &config.agent.tool_filter_groups,
@@ -4766,7 +4769,8 @@ pub async fn process_message(
         excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
     }
 
-    agent_turn(
+
+    let result = agent_turn(
         provider.as_ref(),
         &mut history,
         &tools_registry,
@@ -4786,7 +4790,9 @@ pub async fn process_message(
         None,
         None,
     )
-    .await
+    .await?;
+
+    Ok(result)
 }
 
 #[cfg(test)]
