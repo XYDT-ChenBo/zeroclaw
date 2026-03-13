@@ -200,23 +200,28 @@ pub async fn handle_http_response(
         }));
     });
 
-    let stream = ReceiverStream::new(rx).map(move |chunk| {
-        let payload = serde_json::json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_label,
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "role": "assistant",
-                    "content": chunk,
-                },
-                "finish_reason": null,
-            }],
-        });
-        Ok::<Event, axum::Error>(Event::default().data(payload.to_string()))
-    });
+    let stream = ReceiverStream::new(rx)
+        .map(move |chunk| {
+            let payload = serde_json::json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_label,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": chunk,
+                    },
+                    "finish_reason": null,
+                }],
+            });
+            Ok::<Event, axum::Error>(Event::default().data(payload.to_string()))
+        })
+        // 在所有内容发送完成后补一个 [DONE] 事件，兼容 OpenAI SSE 协议。
+        .chain(tokio_stream::once(Ok::<Event, axum::Error>(
+            Event::default().data("[DONE]"),
+        )));
 
     axum::response::Sse::new(stream).into_response()
 }
