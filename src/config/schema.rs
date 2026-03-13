@@ -6073,6 +6073,7 @@ impl<T: ChannelConfig> crate::config::traits::ConfigHandle for ConfigWrapper<T> 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelsConfig {
+    pub bot_service: Option<BotServiceConfig>,
     /// Enable the CLI interactive channel. Default: `true`.
     #[serde(default = "default_true")]
     pub cli: bool,
@@ -6296,6 +6297,7 @@ fn default_session_backend() -> String {
 impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
+            bot_service: None,
             cli: true,
             telegram: None,
             discord: None,
@@ -6363,6 +6365,33 @@ fn default_multi_message_delay_ms() -> u64 {
 
 fn default_matrix_draft_update_interval_ms() -> u64 {
     1500
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BotServiceConfig {
+    /// Base WebSocket URL for iCenter BotService (e.g. "ws://host:port/zte-icenter-igpt-coclaw/clawbot").
+    pub ws_url: String,
+    /// Optional secret key appended as ?key= when not already present in ws_url.
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Optional account identifier forwarded via X-Emp-No header during WebSocket handshake.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Allowed chat UUIDs or "*" for all. Values are matched against inbound `chatUuid`.
+    #[serde(default)]
+    pub allowed_from: Vec<String>,
+    /// Optional reasoning-channel identifier for future routing customization.
+    #[serde(default)]
+    pub reasoning_channel_id: Option<String>,
+}
+
+impl ChannelConfig for BotServiceConfig {
+    fn name() -> &'static str {
+        "BotService"
+    }
+    fn desc() -> &'static str {
+        "iCenter BotService WebSocket channel"
+    }
 }
 
 /// Telegram bot channel configuration.
