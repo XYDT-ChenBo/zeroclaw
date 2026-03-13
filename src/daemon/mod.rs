@@ -319,18 +319,11 @@ fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<(
 }
 
 fn has_supervised_channels(config: &Config) -> bool {
-    let has_realtime_channels = config
+    config
         .channels_config
         .channels_except_webhook()
         .iter()
-        .any(|(_, ok)| *ok);
-
-    // Always treat the HTTP virtual channel as requiring supervision so that the
-    // channels subsystem (and its in-memory HTTP bus) is started even when no
-    // external real-time channels are configured.
-    let has_http_virtual_channel = true;
-
-    has_realtime_channels || has_http_virtual_channel
+        .any(|(_, ok)| *ok)
 }
 
 #[cfg(test)]
@@ -398,7 +391,7 @@ mod tests {
     #[test]
     fn detects_no_supervised_channels() {
         let config = Config::default();
-        assert!(has_supervised_channels(&config));
+        assert!(!has_supervised_channels(&config));
     }
 
     #[test]

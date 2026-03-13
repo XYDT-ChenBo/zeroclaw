@@ -3,15 +3,13 @@ use axum::{
     http::{header, HeaderMap},
     response::{sse::Event, IntoResponse, Json},
 };
-use chrono::Utc;
-use crate::channels::http::{http_register_non_streaming, http_register_streaming, http_send};
-use crate::channels::traits::ChannelMessage;
-use crate::gateway::AppState;
 use serde::Deserialize;
+use uuid::Uuid;
+use chrono::Utc;
+use crate::gateway::AppState;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{once, StreamExt};
-use uuid::Uuid;
 
 /// OpenAI-compatible chat message.
 #[derive(Deserialize)]
@@ -31,8 +29,6 @@ pub struct HttpChatRequest {
     /// When true, stream OpenAI-style SSE chunks instead of a single JSON response.
     #[serde(default)]
     pub stream: bool,
-    /// Optional session identifier for multi-turn conversations.
-    pub session_id: Option<String>,
 }
 
 /// POST /response — HTTP agent chat (non-streaming, single-turn)
@@ -70,8 +66,7 @@ pub async fn handle_http_response(
             .into_response();
     }
 
-    // 使用最后一条 user 消息作为本轮输入，多轮上下文由 channel 的
-    // conversation_histories 通过 session_id 维护。
+    // Use the last user message as the agent entry point.
     let user_content = body
         .messages
         .iter()
@@ -118,64 +113,19 @@ pub async fn handle_http_response(
     let created = Utc::now().timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
-    // 将 session_id 作为 sender，让 channel 使用相同的会话 key 复用历史。
-    let session = body
-        .session_id
-        .as_deref()
-        .unwrap_or("http-default-agent-session")
-        .to_string();
-    let request_id = Uuid::new_v4().simple().to_string();
-
-    // 非流式：优先通过 HttpChannel 走 channel 流水线，失败时回退到 agent。
+    // 非流式：直接复用现有同步接口。
     if !body.stream {
-        let response_rx = http_register_non_streaming(request_id.clone()).await;
-
-        let msg = ChannelMessage {
-            id: id.clone(),
-            sender: session.clone(),
-            reply_target: request_id.clone(),
-            content: user_content.clone(),
-            channel: "http".to_string(),
-            timestamp: created as u64,
-            thread_ts: None,
-        };
-
-        if http_send(msg).await.is_ok() {
-            match response_rx.await {
-                Ok(response_text) => {
-                    let body = serde_json::json!({
-                        "id": id,
-                        "object": "chat.completion",
-                        "created": created,
-                        "model": model_label,
-                        "choices": [{
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": response_text,
-                            },
-                            "finish_reason": "stop",
-                        }],
-                    });
-                    return Json(body).into_response();
-                }
-                Err(e) => {
-                    let sanitized =
-                        crate::providers::sanitize_api_error(&format!("http channel error: {e}"));
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({ "error": sanitized })),
-                    )
-                        .into_response();
-                }
-            }
-        }
-
-        // 回退：仍然可以直接走 agent，实现兼容 gateway-only 场景。
         let result = crate::agent::process_message(config, &user_content, None).await;
 
         return match result {
             Ok(response_text) => {
+                // Broadcast agent_end event
+                let _ = state.event_tx.send(serde_json::json!({
+                    "type": "agent_end",
+                    "provider": provider_label,
+                    "model": model_label,
+                }));
+
                 let body = serde_json::json!({
                     "id": id,
                     "object": "chat.completion",
@@ -195,6 +145,13 @@ pub async fn handle_http_response(
             Err(e) => {
                 let sanitized = crate::providers::sanitize_api_error(&format!("{e}"));
 
+                // Broadcast error event
+                let _ = state.event_tx.send(serde_json::json!({
+                    "type": "error",
+                    "component": "http_chat",
+                    "message": sanitized,
+                }));
+
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -206,72 +163,33 @@ pub async fn handle_http_response(
         };
     }
 
-    // 流式：优先通过 HttpChannel 的 draft 机制复用 channel 逻辑。
-    let stream_rx = http_register_streaming(request_id.clone(), 64).await;
+    // 流式：通过 on_delta sender 把 agent 内部的最终文本流式发出来。
+    let (tx, rx) = mpsc::channel::<String>(16);
+    let config_for_agent = config.clone();
+    let user_content_for_agent = user_content.clone();
+    let provider_for_agent = provider_label.clone();
+    let model_for_agent = model_label.clone();
+    let event_tx = state.event_tx.clone();
 
-    let msg = ChannelMessage {
-        id: id.clone(),
-        sender: session,
-        reply_target: request_id,
-        content: user_content.clone(),
-        channel: "http".to_string(),
-        timestamp: created as u64,
-        thread_ts: None,
-    };
+    tokio::spawn(async move {
+        let _ = crate::agent::process_message_with_stream(
+            config_for_agent,
+            &user_content_for_agent,
+            None,
+            Some(tx),
+        )
+        .await;
 
-    if http_send(msg).await.is_err() {
-        // 回退到原来的 agent streaming 实现。
-        let (tx, rx) = mpsc::channel::<String>(16);
-        let config_for_agent = config.clone();
-        let user_content_for_agent = user_content.clone();
-        let provider_for_agent = provider_label.clone();
-        let model_for_agent = model_label.clone();
-        let event_tx = state.event_tx.clone();
-
-        tokio::spawn(async move {
-            let _ = crate::agent::process_message_with_stream(
-                config_for_agent,
-                &user_content_for_agent,
-                None,
-                Some(tx),
-            )
-            .await;
-
-            let _ = event_tx.send(serde_json::json!({
-                "type": "agent_end",
-                "provider": provider_for_agent,
-                "model": model_for_agent,
-            }));
-        });
-
-        let model_label_for_stream = model_label.clone();
-        let stream = ReceiverStream::new(rx)
-            .map(move |chunk| {
-                let payload = serde_json::json!({
-                    "id": id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_label_for_stream,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": chunk,
-                        },
-                        "finish_reason": null,
-                    }],
-                });
-                Ok::<Event, axum::Error>(Event::default().data(payload.to_string()))
-            })
-            .chain(once(Ok::<Event, axum::Error>(
-                Event::default().data("[DONE]"),
-            )));
-
-        return axum::response::Sse::new(stream).into_response();
-    }
+        // agent 结束时广播 agent_end 事件
+        let _ = event_tx.send(serde_json::json!({
+            "type": "agent_end",
+            "provider": provider_for_agent,
+            "model": model_for_agent,
+        }));
+    });
 
     let model_label_for_stream = model_label.clone();
-    let stream = ReceiverStream::new(stream_rx)
+    let stream = ReceiverStream::new(rx)
         .map(move |chunk| {
             let payload = serde_json::json!({
                 "id": id,
