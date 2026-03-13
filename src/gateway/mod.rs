@@ -901,6 +901,7 @@ async fn run_gateway_chat_with_tools(state: &AppState, message: &str) -> anyhow:
         config,
         message,
         if extra_tools.is_empty() { None } else { Some(extra_tools) },
+        None,
     )
     .await
 }

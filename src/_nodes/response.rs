@@ -29,6 +29,9 @@ pub struct HttpChatRequest {
     /// When true, stream OpenAI-style SSE chunks instead of a single JSON response.
     #[serde(default)]
     pub stream: bool,
+    /// Optional session ID for conversation continuity. When set, history is loaded from and
+    /// saved to workspace/sessions/{session_id}/history_conversation.json.
+    pub session_id: Option<String>,
 }
 
 /// POST /response — HTTP agent chat (non-streaming, single-turn)
@@ -86,6 +89,13 @@ pub async fn handle_http_response(
             .into_response();
     }
 
+    // 仅当 session_id 合法时用于会话历史持久化
+    let session_id = body
+        .session_id
+        .as_deref()
+        .or(Some("http-agent-default-session"))
+        .and_then(super::session_id::sanitize);
+
     // 使用完整 Agent 流程（包含 tools 和 skills），并支持按请求覆盖模型。
     let mut config = state.config.lock().clone();
     if let Some(model) = &body.model {
@@ -115,7 +125,8 @@ pub async fn handle_http_response(
 
     // 非流式：直接复用现有同步接口。
     if !body.stream {
-        let result = crate::agent::process_message(config, &user_content, None).await;
+        let result =
+            crate::agent::process_message(config, &user_content, None, session_id).await;
 
         return match result {
             Ok(response_text) => {
@@ -171,12 +182,14 @@ pub async fn handle_http_response(
     let model_for_agent = model_label.clone();
     let event_tx = state.event_tx.clone();
 
+    let session_id_for_agent = session_id.map(String::from);
     tokio::spawn(async move {
         let _ = crate::agent::process_message_with_stream(
             config_for_agent,
             &user_content_for_agent,
             None,
             Some(tx),
+            session_id_for_agent.as_deref(),
         )
         .await;
 

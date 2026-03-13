@@ -4,8 +4,9 @@
 //! It includes the node registry, the WebSocket node, and the response handling.
 
 pub mod node_registry;
-pub mod ws_node;
 pub mod response;
+pub mod session_id;
+pub mod ws_node;
 
 pub use node_registry::ConnectedNodeRegistry;
 pub use ws_node::handle_ws_node;
