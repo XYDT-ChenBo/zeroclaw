@@ -5610,6 +5610,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     Ok(())
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
