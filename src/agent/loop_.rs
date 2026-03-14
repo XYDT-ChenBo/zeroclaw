@@ -334,7 +334,7 @@ pub(crate) fn scrub_credentials(input: &str) -> String {
 const DEFAULT_MAX_HISTORY_MESSAGES: usize = 50;
 
 /// Keep this many most-recent non-system messages after compaction.
-const COMPACTION_KEEP_RECENT_MESSAGES: usize = 20;
+const COMPACTION_KEEP_RECENT_MESSAGES: usize = 5;
 
 /// Safety cap for compaction source transcript passed to the summarizer.
 const COMPACTION_MAX_SOURCE_CHARS: usize = 12_000;
@@ -424,7 +424,7 @@ fn is_safe_session_id(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Load prior conversation history from sessions/{session_id}/history_conversation.json.
+/// Load prior conversation history from sessions/{session_id}.json.
 /// Returns at most `max_history_messages` most recent messages (no system). Empty on missing/error.
 fn load_session_history(
     workspace_dir: &Path,
@@ -433,8 +433,7 @@ fn load_session_history(
 ) -> Vec<ChatMessage> {
     let path = workspace_dir
         .join("sessions")
-        .join(session_id)
-        .join(SESSION_HISTORY_FILENAME);
+        .join(format!("{session_id}.json"));
     let Ok(data) = std::fs::read_to_string(&path) else {
         return vec![];
     };
@@ -445,15 +444,15 @@ fn load_session_history(
     prior
 }
 
-/// Save conversation history to sessions/{session_id}/history_conversation.json.
+/// Save conversation history to sessions/{session_id}.json.
 fn save_session_history(
     workspace_dir: &Path,
     session_id: &str,
     history: &[ChatMessage],
 ) -> Result<()> {
-    let dir = workspace_dir.join("sessions").join(session_id);
+    let dir = workspace_dir.join("sessions");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(SESSION_HISTORY_FILENAME);
+    let path = dir.join(format!("{session_id}.json"));
     let data = serde_json::to_string_pretty(history)?;
     std::fs::write(path, data)?;
     Ok(())
@@ -500,7 +499,10 @@ fn apply_compaction_summary(
     summary: &str,
 ) {
     let summary_msg = ChatMessage::assistant(format!("[Compaction summary]\n{}", summary.trim()));
-    history.splice(start..compact_end, std::iter::once(summary_msg));
+    // Remove the compacted segment from its original position and append the
+    // summary to the end so that persisted histories place summaries last.
+    history.drain(start..compact_end);
+    history.push(summary_msg);
 }
 
 async fn auto_compact_history(
@@ -544,7 +546,26 @@ async fn auto_compact_history(
     let to_compact: Vec<ChatMessage> = history[start..compact_end].to_vec();
     let transcript = build_compaction_transcript(&to_compact);
 
-    let summarizer_system = "You are a conversation compaction engine. Summarize older chat history into concise context for future turns. Preserve: user preferences, commitments, decisions, unresolved tasks, key facts. Omit: filler, repeated chit-chat, verbose tool logs. Output plain text bullet points only.";
+    let summarizer_system = "You are a conversation compaction engine. Turn older chat history into concise, actionable context that helps complete similar tasks faster next time.
+Must preserve and highlight:
+- User preferences, tone, length, language, output format habits
+- All commitments, final decisions, agreed plans
+- Unresolved tasks / to-dos with status
+- Core facts, entities, data points
+- Most frequent command patterns and shortcuts the user uses
+- Detailed, repeatable execution steps for recurring task types (1. 2. 3. order, tools, validations)
+- Any hints / complaints about what slows things down or what should be defaulted / skipped next time
+
+Discard without mercy:
+- Filler, chit-chat, redundant confirmations
+- Verbose logs, intermediate tool outputs (only final result matters)
+- Anything already finished or overruled
+
+Output rules:
+- Only plain text bullet points
+- Use sub-bullets or numbering for steps/sequences
+- Put reusable templates and SOP-like flows in front
+- Keep total concise; aim for high signal, low noise";
 
     let summarizer_user = format!(
         "Summarize the following conversation history for context preservation. Keep it short (max 12 bullet points).\n\n{}",
@@ -4764,7 +4785,6 @@ pub async fn process_message_with_stream(
             .collect();
         h.insert(0, ChatMessage::system(&system_prompt));
         h.push(ChatMessage::user(&enriched));
-        trim_history(&mut h, config.agent.max_history_messages);
         h
     } else {
         vec![
@@ -4804,6 +4824,21 @@ pub async fn process_message_with_stream(
         on_delta,
     )
     .await?;
+
+        // Auto-compaction before hard trimming to preserve long-context signal.
+    if let Ok(compacted) = auto_compact_history(
+        &mut history,
+        provider.as_ref(),
+        &model_name,
+        config.agent.max_history_messages,
+        config.agent.max_context_tokens
+    )
+    .await
+    {
+        if compacted {
+            println!("🧹 Auto-compaction complete");
+        }
+    }
 
     if let Some(sid) = session_id.filter(|s| is_safe_session_id(s)) {
         trim_history(&mut history, config.agent.max_history_messages);
@@ -7166,10 +7201,10 @@ Tail"#;
 
         apply_compaction_summary(&mut history, 1, 3, "- user prefers concise replies");
 
-        assert_eq!(history.len(), 4);
-        assert!(history[1].content.contains("Compaction summary"));
-        assert!(history[2].content.contains("recent 1"));
-        assert!(history[3].content.contains("recent 2"));
+        assert_eq!(history.len(), 3);
+        assert!(history[0].content.contains("sys"));
+        assert!(history[1].content.contains("recent 1"));
+        assert!(history[2].content.contains("Compaction summary"));
     }
 
     #[test]
