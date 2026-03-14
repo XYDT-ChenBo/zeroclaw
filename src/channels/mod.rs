@@ -2479,13 +2479,17 @@ pub fn build_system_prompt_with_mode(
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
 
+    // ── 0. Introduction ──────────────────────────────────────────────
+    prompt.push_str("# ZeroClaw\n");
+    prompt.push_str("You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct. \n\n");
+
     // ── 1. Tooling ──────────────────────────────────────────────
     if !tools.is_empty() {
-        prompt.push_str("## Tools\n\n");
-        prompt.push_str("You have access to the following tools:\n\n");
-        for (name, desc) in tools {
-            let _ = writeln!(prompt, "- **{name}**: {desc}");
-        }
+        prompt.push_str("## Tools\n");
+        prompt.push_str("You must use the provided tools in the correct manner and pass all parameters precisely as specified.  If you are uncertain about the proper usage or handling of any tool, refer to the relevant skill instructions, which may contain specific guidance.\n");
+        // for (name, desc) in tools {
+        //     let _ = writeln!(prompt, "- **{name}**: {desc}");
+        // }
         prompt.push('\n');
     }
 
@@ -3426,60 +3430,11 @@ pub async fn start_channels(config: Config) -> Result<()> {
 
     let skills = crate::skills::load_skills_with_config(&workspace, &config);
 
-    // Collect tool descriptions for the prompt
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        (
-            "shell",
-            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
-        ),
-        (
-            "file_read",
-            "Read file contents. Use when: inspecting project files, configs, logs. Don't use when: a targeted search is enough.",
-        ),
-        (
-            "file_write",
-            "Write file contents. Use when: applying focused edits, scaffolding files, updating docs/code. Don't use when: side effects are unclear or file ownership is uncertain.",
-        ),
-        (
-            "memory_store",
-            "Save to memory. Use when: preserving durable preferences, decisions, key context. Don't use when: information is transient/noisy/sensitive without need.",
-        ),
-        (
-            "memory_recall",
-            "Search memory. Use when: retrieving prior decisions, user preferences, historical context. Don't use when: answer is already in current context.",
-        ),
-        (
-            "memory_forget",
-            "Delete a memory entry. Use when: memory is incorrect/stale or explicitly requested for removal. Don't use when: impact is uncertain.",
-        ),
-    ];
-
-    if config.browser.enabled {
-        tool_descs.push((
-            "browser_open",
-            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
-        ));
-    }
-    if config.composio.enabled {
-        tool_descs.push((
-            "composio",
-            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover actions, 'list_accounts' to retrieve connected account IDs, 'execute' to run (optionally with connected_account_id), and 'connect' for OAuth.",
-        ));
-    }
-    tool_descs.push((
-        "schedule",
-        "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
-    ));
-    tool_descs.push((
-        "pushover",
-        "Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.",
-    ));
-    if !config.agents.is_empty() {
-        tool_descs.push((
-            "delegate",
-            "Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt and returns its response.",
-        ));
-    }
+    // Dynamically extract tool descriptions from the tools_registry
+    let mut tool_descs: Vec<(&str, &str)> = tools_registry
+        .iter()
+        .map(|tool| (tool.name(), tool.description()))
+        .collect();
 
     // Filter out tools excluded for non-CLI channels so the system prompt
     // does not advertise them for channel-driven runs.
