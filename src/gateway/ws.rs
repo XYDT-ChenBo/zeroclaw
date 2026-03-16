@@ -8,7 +8,7 @@
 //! Server -> Client: {"type":"tool_result","name":"shell","output":"..."}
 //! Server -> Client: {"type":"done","full_response":"..."}
 //! ```
-
+use tracing::{debug, info, warn};
 use super::AppState;
 use axum::{
     extract::{

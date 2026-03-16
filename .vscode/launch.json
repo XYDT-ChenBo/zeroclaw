@@ -1,72 +1,205 @@
 {
   "version": "0.2.0",
-  "inputs": [
-    {
-      "id": "testName",
-      "description": "Exact test name to debug (e.g. tests::my_test)",
-      "type": "promptString",
-      "default": ""
-    }
-  ],
   "configurations": [
-    // ── Runtime ───────────────────────────────────────────
+    // ========== 基础入口类命令 ==========
     {
+      "name": "zeroclaw onboard",
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Agent",
       "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": ["agent"],
+      "args": [
+        "onboard"
+      ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build: Debug"
+      "env": {
+        "RUST_LOG": "info,zeroclaw=debug"
+      }
     },
     {
+      "name": "zeroclaw agent",
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Gateway",
       "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": ["gateway"],
+      "args": [
+        "agent"
+      ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build: Debug"
+      "env": {
+        "RUST_LOG": "info,zeroclaw=debug"
+      }
     },
     {
+      "name": "zeroclaw gateway",
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Daemon",
       "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": ["daemon"],
+      "args": [
+        "gateway"
+      ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build: Debug"
+      "env": {
+        "RUST_LOG": "info,zeroclaw=debug"
+      }
     },
     {
+      "name": "zeroclaw daemon",
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Status",
       "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": ["status"],
+      "args": [
+        "daemon"
+      ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build: Debug"
+      "env": {
+        "RUST_LOG": "info,zeroclaw=debug"
+      }
+    },
+    // ========== 运维/诊断类命令 ==========
+    {
+      "name": "zeroclaw doctor",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "doctor"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_LOG": "info,zeroclaw=debug"
+      }
     },
     {
+      "name": "zeroclaw status",
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Onboard",
       "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": ["onboard"],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build: Debug"
+      "args": [
+        "status"
+      ],
+      "cwd": "${workspaceFolder}"
     },
-    // ── Test ──────────────────────────────────────────────
     {
+      "name": "zeroclaw estop",
       "type": "lldb",
       "request": "launch",
-      "name": "Debug: Test (by name)",
-      "cargo": {
-        "args": ["test", "--no-run", "--lib", "--"],
-        "filter": {
-          "kind": "lib"
-        }
-      },
-      "args": ["--exact", "${input:testName}", "--nocapture"],
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "estop"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    // ========== 调度 / 模型 / Provider ==========
+    {
+      "name": "zeroclaw cron",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "cron"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw models",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "models"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw providers",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "providers"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    // ========== Channel / Skills / Integrations ==========
+    {
+      "name": "zeroclaw channel",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "channel"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw skills",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "skills"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw integrations",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "integrations"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    // ========== 迁移 / 配置 / 补全 ==========
+    {
+      "name": "zeroclaw migrate",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "migrate"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw config",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "config"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw completions",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "completions"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    // ========== 硬件 / 外设 ==========
+    {
+      "name": "zeroclaw hardware",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "hardware"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "zeroclaw peripheral",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "args": [
+        "peripheral"
+      ],
       "cwd": "${workspaceFolder}"
     }
   ]

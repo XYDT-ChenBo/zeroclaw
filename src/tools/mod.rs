@@ -14,7 +14,8 @@
 //!
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
-
+pub use broadcast::BroadcastTool;
+pub mod broadcast;
 pub mod browser;
 pub mod browser_open;
 pub mod cli_discovery;
@@ -60,6 +61,7 @@ pub mod shell;
 pub mod swarm;
 pub mod tool_search;
 pub mod traits;
+pub mod weather;
 pub mod web_fetch;
 pub mod web_search_tool;
 
@@ -109,6 +111,7 @@ pub use tool_search::ToolSearchTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
+pub use weather::WeatherTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 
@@ -252,7 +255,7 @@ pub fn all_tools_with_runtime(
     root_config: &crate::config::Config,
 ) -> (Vec<Box<dyn Tool>>, Option<DelegateParentToolsHandle>) {
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(ShellTool::new(security.clone(), runtime)),
+        Arc::new(ShellTool::new(security.clone(), runtime.clone())),
         Arc::new(FileReadTool::new(security.clone())),
         Arc::new(FileWriteTool::new(security.clone())),
         Arc::new(FileEditTool::new(security.clone())),
@@ -310,14 +313,38 @@ pub fn all_tools_with_runtime(
         )));
     }
 
+    if root_config.broadcast.enabled && !root_config.broadcast.allowlist.is_empty() {
+        tool_arcs.push(Arc::new(BroadcastTool::new(
+            root_config.broadcast.clone(),
+            security.clone(),
+            runtime.clone(),
+        )));
+    }
+
+    let mut http_tool: Option<Arc<HttpRequestTool>> = None;
     if http_config.enabled {
-        tool_arcs.push(Arc::new(HttpRequestTool::new(
+        let http = Arc::new(HttpRequestTool::new(
             security.clone(),
             http_config.allowed_domains.clone(),
             http_config.max_response_size,
             http_config.timeout_secs,
             http_config.allow_private_hosts,
-        )));
+        ));
+        http_tool = Some(http.clone());
+        tool_arcs.push(http);
+    }
+
+    if root_config.weather.enabled && !root_config.weather.endpoints.is_empty() {
+        if let Some(http) = &http_tool {
+            tool_arcs.push(Arc::new(WeatherTool::new(
+                root_config.weather.clone(),
+                http.clone(),
+            )));
+        } else {
+            tracing::warn!(
+                "weather tool is enabled but [http_request] is disabled; skipping weather tool registration"
+            );
+        }
     }
 
     if web_fetch_config.enabled {

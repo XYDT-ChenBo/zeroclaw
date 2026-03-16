@@ -187,6 +187,13 @@ pub struct Config {
     /// Composio managed OAuth tools integration (`[composio]`).
     #[serde(default)]
     pub composio: ComposioConfig,
+    /// Generic broadcast tool configuration (`[broadcast]`).
+    #[serde(default)]
+    pub broadcast: BroadcastConfig,
+
+    /// Weather tool configuration (`[weather]`). Extensible endpoints (weather, air_quality).
+    #[serde(default)]
+    pub weather: WeatherConfig,
 
     /// Secrets encryption configuration (`[secrets]`).
     #[serde(default)]
@@ -1156,6 +1163,117 @@ pub struct PeripheralsConfig {
     /// Place .md/.txt files named by board (e.g. nucleo-f401re.md, rpi-gpio.md).
     #[serde(default)]
     pub datasheet_dir: Option<String>,
+}
+
+// ── Generic broadcast tool (Android intents) ─────────────────────
+
+/// Generic broadcast tool configuration (`[broadcast]` section).
+///
+/// This does not construct JSON payloads itself; instead it enforces a
+/// strict allowlist of (package, action, extras) that may be sent via
+/// `am broadcast`. Higher-level skills (e.g. alarm integration) should
+/// build their payloads and pass them as extras (typically `remindInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BroadcastConfig {
+    /// Enable the broadcast tool.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Binary name or path for sending broadcasts (default: am, use TermuxAm on Termux).
+    #[serde(default = "default_broadcast_am_binary")]
+    pub am_binary: String,
+    /// Allowlisted broadcast rules. Only (package, action) pairs present here
+    /// are permitted, and only configured extras keys/types will be accepted.
+    #[serde(default)]
+    pub allowlist: Vec<BroadcastAllowRule>,
+    /// Request timeout in seconds for the broadcast command.
+    #[serde(default = "default_broadcast_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_broadcast_am_binary() -> String {
+    "am".into()
+}
+
+fn default_broadcast_timeout_secs() -> u64 {
+    10
+}
+
+impl Default for BroadcastConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            am_binary: default_broadcast_am_binary(),
+            allowlist: Vec::new(),
+            timeout_secs: default_broadcast_timeout_secs(),
+        }
+    }
+}
+
+/// One allowlisted broadcast rule: package + action + extras schema.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BroadcastAllowRule {
+    /// Target package name (e.g. com.haobai.clock).
+    pub package: String,
+    /// Broadcast action (e.g. com.haobai.clock.SET_ALARM).
+    pub action: String,
+    /// Allowed extras and their types for this (package, action).
+    #[serde(default)]
+    pub extras: HashMap<String, BroadcastExtraType>,
+}
+
+/// Allowed extra value types for broadcast; controls which `am` flag is used.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastExtraType {
+    /// String extra (`--es`).
+    String,
+    /// Integer extra (`--ei`).
+    Int,
+    /// Boolean extra (`--ez`).
+    Bool,
+    /// JSON string extra (`--es` with a JSON-encoded string).
+    JsonString,
+}
+
+// ── Weather (extensible API) ────────────────────────────────────
+
+/// Weather tool configuration (`[weather]` section).
+///
+/// Supports multiple endpoints (weather, air_quality, etc.). Region code and
+/// API key are read from config; region can be overridden per request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WeatherConfig {
+    /// Enable the weather tool
+    #[serde(default)]
+    pub enabled: bool,
+    /// Default region code (overridable per request)
+    #[serde(default)]
+    pub stationid: Option<String>,
+    /// API key (not logged or exposed to prompt)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Endpoint URLs by query_type: weather, air_quality, etc.
+    #[serde(default)]
+    pub endpoints: HashMap<String, String>,
+    /// Request timeout in seconds
+    #[serde(default = "default_weather_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_weather_timeout_secs() -> u64 {
+    15
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stationid: None,
+            api_key: None,
+            endpoints: HashMap::new(),
+            timeout_secs: default_weather_timeout_secs(),
+        }
+    }
 }
 
 /// Configuration for a single peripheral board (e.g. STM32, RPi GPIO).
@@ -4252,6 +4370,8 @@ impl Default for Config {
             tts: TtsConfig::default(),
             mcp: McpConfig::default(),
             nodes: NodesConfig::default(),
+            broadcast: BroadcastConfig::default(),
+            weather: WeatherConfig::default(),
         }
     }
 }
@@ -6346,6 +6466,7 @@ default_temperature = 0.7
             multimodal: MultimodalConfig::default(),
             web_fetch: WebFetchConfig::default(),
             web_search: WebSearchConfig::default(),
+            weather: WeatherConfig::default(),
             proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
             identity: IdentityConfig::default(),
@@ -6638,6 +6759,7 @@ tool_dispatcher = "xml"
             multimodal: MultimodalConfig::default(),
             web_fetch: WebFetchConfig::default(),
             web_search: WebSearchConfig::default(),
+            weather: WeatherConfig::default(),
             proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
             identity: IdentityConfig::default(),
