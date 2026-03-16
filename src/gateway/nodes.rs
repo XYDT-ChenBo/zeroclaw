@@ -1,622 +1,774 @@
-//! WebSocket endpoint for dynamic node discovery and capability advertisement.
-//!
-//! External processes/devices connect to `/ws/nodes` and advertise their
-//! capabilities at runtime. The gateway exposes these as dynamically available
-//! tools to the agent.
-//!
-//! ## Protocol
-//!
-//! ```text
-//! Node -> Gateway: {"type":"register","node_id":"phone-1","capabilities":[{"name":"camera.snap","description":"Take a photo","parameters":{...}}]}
-//! Gateway -> Node: {"type":"registered","node_id":"phone-1","capabilities_count":1}
-//! Gateway -> Node: {"type":"invoke","call_id":"uuid","capability":"camera.snap","args":{...}}
-//! Node -> Gateway: {"type":"result","call_id":"uuid","success":true,"output":"..."}
-//! ```
+//! Connected-node registry: holds WebSocket node sessions and pending request/response.
 
-use super::AppState;
+use async_trait::async_trait;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Query, State, WebSocketUpgrade,
+        ConnectInfo, State, WebSocketUpgrade,
     },
-    http::{header, HeaderMap},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use futures_util::{SinkExt, StreamExt};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{self, MissedTickBehavior},
+};
+use uuid::Uuid;
+use crate::gateway::AppState;
 
-/// Prefix used in `Sec-WebSocket-Protocol` to carry a bearer token.
-const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
+/// Default timeout for invoke/run when waiting for node response.
+pub const DEFAULT_NODE_INVOKE_TIMEOUT_SECS: u64 = 60;
 
-/// The sub-protocol we support for node connections.
-const WS_NODE_PROTOCOL: &str = "zeroclaw.nodes.v1";
 
-/// A single capability advertised by a node.
+/// Trait for the connected-node registry. Implemented by the gateway when
+/// node-control is enabled; used by [`NodesTool`] and HTTP node-control API.
+#[async_trait]
+pub trait NodeRegistry: Send + Sync {
+    /// List all connected nodes (optionally filtered by allowlist elsewhere).
+    fn list(&self) -> Vec<NodeInfo>;
+
+    /// Describe one node by id; None if not connected.
+    fn describe(&self, node_id: &str) -> Option<NodeDescription>;
+
+    /// Send a structured invoke to the node; waits for response with timeout.
+    async fn invoke(
+        &self,
+        node_id: &str,
+        capability: &str,
+        arguments: Value,
+    ) -> anyhow::Result<NodeCommandResult>;
+
+    /// Send a raw command (e.g. shell) to the node; waits for response with timeout.
+    async fn run(&self, node_id: &str, raw_command: &str) -> anyhow::Result<NodeCommandResult>;
+}
+
+/// Info for one connected node (list entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeCapability {
-    pub name: String,
-    pub description: String,
-    #[serde(default = "default_capability_parameters")]
-    pub parameters: serde_json::Value,
-}
-
-fn default_capability_parameters() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {}
-    })
-}
-
-/// Tracks a connected node and its capabilities.
-#[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub node_id: String,
-    pub capabilities: Vec<NodeCapability>,
-    /// Channel to send invocation requests to the node's WebSocket handler.
-    pub invoke_tx: mpsc::Sender<NodeInvocation>,
+    pub status: String,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
-/// An invocation request sent to a node.
-#[derive(Debug)]
-pub struct NodeInvocation {
-    pub call_id: String,
-    pub capability: String,
-    pub args: serde_json::Value,
-    pub response_tx: oneshot::Sender<NodeInvocationResult>,
-}
-
-/// The result of a node invocation.
+/// Full description for a single node (describe).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeInvocationResult {
+pub struct NodeDescription {
+    pub node_id: String,
+    pub status: String,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// Result of an invoke or run command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeCommandResult {
     pub success: bool,
     pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// Registry of all connected nodes and their capabilities.
-#[derive(Debug, Default, Clone)]
-pub struct NodeRegistry {
-    nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
-    max_nodes: usize,
+/// Message sent from registry to the connection handler to be forwarded to the node.
+#[derive(Debug)]
+pub enum OutgoingMessage {
+    Invoke {
+        request_id: String,
+        capability: String,
+        arguments: Value,
+    },
+    Run {
+        request_id: String,
+        command: String,
+    },
 }
 
-impl NodeRegistry {
-    /// Create a new registry with the given capacity limit.
-    pub fn new(max_nodes: usize) -> Self {
+/// One connected node session: channel to send invoke/run to the handler.
+struct NodeSession {
+    node_id: String,
+    capabilities: Vec<String>,
+    meta: Option<Value>,
+    tx: mpsc::Sender<OutgoingMessage>,
+}
+
+/// In-memory registry of connected nodes; implements [`NodeRegistry`].
+pub struct ConnectedNodeRegistry {
+    sessions: RwLock<HashMap<String, NodeSession>>,
+    pending: Mutex<HashMap<String, oneshot::Sender<NodeCommandResult>>>,
+    invoke_timeout: Duration,
+}
+
+static CONNECTED_NODE_REGISTRY: OnceLock<Arc<ConnectedNodeRegistry>> = OnceLock::new();
+
+impl ConnectedNodeRegistry {
+    /// Get global singleton instance of connected-node registry.
+    pub fn global() -> Arc<ConnectedNodeRegistry> {
+        CONNECTED_NODE_REGISTRY
+            .get_or_init(|| Arc::new(ConnectedNodeRegistry::new()))
+            .clone()
+    }
+
+    pub fn new() -> Self {
+        Self::with_timeout(Duration::from_secs(DEFAULT_NODE_INVOKE_TIMEOUT_SECS))
+    }
+
+    pub fn with_timeout(invoke_timeout: Duration) -> Self {
         Self {
-            nodes: Arc::new(RwLock::new(HashMap::new())),
-            max_nodes,
+            sessions: RwLock::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+            invoke_timeout,
         }
     }
 
-    /// Register a node with its capabilities. Returns false if at capacity.
-    pub fn register(&self, info: NodeInfo) -> bool {
-        let mut nodes = self.nodes.write();
-        if nodes.len() >= self.max_nodes && !nodes.contains_key(&info.node_id) {
-            return false;
-        }
-        nodes.insert(info.node_id.clone(), info);
-        true
+    /// Register a node (called from WebSocket handler after receiving register message).
+    /// Returns a receiver for outgoing messages the handler must forward to the node.
+    pub fn register(
+        &self,
+        node_id: String,
+        capabilities: Vec<String>,
+        meta: Option<Value>,
+    ) -> mpsc::Receiver<OutgoingMessage> {
+        let (tx, rx) = mpsc::channel(32);
+        let session = NodeSession {
+            node_id: node_id.clone(),
+            capabilities: capabilities.clone(),
+            meta: meta.clone(),
+            tx,
+        };
+        self.sessions.write().insert(node_id, session);
+        rx
     }
 
-    /// Remove a node from the registry.
+    /// Remove a node (called when WebSocket disconnects).
+    /// In-flight requests for this node will time out in the caller.
     pub fn unregister(&self, node_id: &str) {
-        self.nodes.write().remove(node_id);
+        self.sessions.write().remove(node_id);
     }
 
-    /// List all registered node IDs.
-    pub fn node_ids(&self) -> Vec<String> {
-        self.nodes.read().keys().cloned().collect()
+    /// Complete a pending request (called from WebSocket handler on invoke_result/run_result).
+    pub fn complete_pending(&self, request_id: &str, result: NodeCommandResult) {
+        if let Some(tx) = self.pending.lock().remove(request_id) {
+            let _ = tx.send(result);
+        }
     }
 
-    /// Get all capabilities across all nodes, keyed by prefixed tool name.
-    pub fn all_capabilities(&self) -> Vec<(String, String, NodeCapability)> {
-        let nodes = self.nodes.read();
-        let mut caps = Vec::new();
-        for info in nodes.values() {
-            for cap in &info.capabilities {
-                caps.push((info.node_id.clone(), cap.name.clone(), cap.clone()));
+    /// Filter list by allowlist when non-empty; pass empty slice to allow all.
+    fn filter_by_allowlist(&self, allowed_node_ids: &[String]) -> Vec<NodeInfo> {
+        let list = self.list_inner();
+        if allowed_node_ids.is_empty() {
+            return list;
+        }
+        let allowed: std::collections::HashSet<_> = allowed_node_ids
+            .iter()
+            .filter(|s| *s != "*")
+            .collect();
+        if allowed.is_empty() {
+            return list;
+        }
+        list.into_iter()
+            .filter(|n| allowed.contains(&n.node_id))
+            .collect()
+    }
+}
+
+impl Default for ConnectedNodeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConnectedNodeRegistry {
+    fn list_inner(&self) -> Vec<NodeInfo> {
+        self.sessions
+            .read()
+            .values()
+            .map(|s| NodeInfo {
+                node_id: s.node_id.clone(),
+                status: "connected".to_string(),
+                capabilities: s.capabilities.clone(),
+                meta: s.meta.clone(),
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl NodeRegistry for ConnectedNodeRegistry {
+    fn list(&self) -> Vec<NodeInfo> {
+        self.list_inner()
+    }
+
+    fn describe(&self, node_id: &str) -> Option<NodeDescription> {
+        self.sessions.read().get(node_id).map(|s| NodeDescription {
+            node_id: s.node_id.clone(),
+            status: "connected".to_string(),
+            capabilities: s.capabilities.clone(),
+            meta: s.meta.clone(),
+        })
+    }
+
+    async fn invoke(
+        &self,
+        node_id: &str,
+        capability: &str,
+        arguments: Value,
+    ) -> anyhow::Result<NodeCommandResult> {
+        let tx = self
+            .sessions
+            .read()
+            .get(node_id)
+            .map(|s| s.tx.clone())
+            .ok_or_else(|| anyhow::anyhow!("node '{node_id}' not connected"))?;
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.pending.lock().insert(request_id.clone(), resp_tx);
+
+        let msg = OutgoingMessage::Invoke {
+            request_id: request_id.clone(),
+            capability: capability.to_string(),
+            arguments,
+        };
+        tx.send(msg)
+            .await
+            .map_err(|_| anyhow::anyhow!("node '{node_id}' channel closed"))?;
+
+        match tokio::time::timeout(self.invoke_timeout, resp_rx).await {
+            Ok(Ok(res)) => Ok(res),
+            Ok(Err(_)) => {
+                self.pending.lock().remove(&request_id);
+                Ok(NodeCommandResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("request cancelled".into()),
+                })
+            }
+            Err(_) => {
+                self.pending.lock().remove(&request_id);
+                Ok(NodeCommandResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "timeout after {}s waiting for node response",
+                        self.invoke_timeout.as_secs()
+                    )),
+                })
             }
         }
-        caps
     }
 
-    /// Get the invocation sender for a specific node.
-    pub fn invoke_tx(&self, node_id: &str) -> Option<mpsc::Sender<NodeInvocation>> {
-        self.nodes.read().get(node_id).map(|n| n.invoke_tx.clone())
-    }
+    async fn run(&self, node_id: &str, raw_command: &str) -> anyhow::Result<NodeCommandResult> {
+        let tx = self
+            .sessions
+            .read()
+            .get(node_id)
+            .map(|s| s.tx.clone())
+            .ok_or_else(|| anyhow::anyhow!("node '{node_id}' not connected"))?;
 
-    /// Check if a node is registered.
-    pub fn contains(&self, node_id: &str) -> bool {
-        self.nodes.read().contains_key(node_id)
-    }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.pending.lock().insert(request_id.clone(), resp_tx);
 
-    /// Number of registered nodes.
-    pub fn len(&self) -> usize {
-        self.nodes.read().len()
-    }
+        let msg = OutgoingMessage::Run {
+            request_id: request_id.clone(),
+            command: raw_command.to_string(),
+        };
+        tx.send(msg)
+            .await
+            .map_err(|_| anyhow::anyhow!("node '{node_id}' channel closed"))?;
 
-    /// Whether the registry is empty.
-    pub fn is_empty(&self) -> bool {
-        self.nodes.read().is_empty()
-    }
-}
-
-/// Messages received from a node.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum NodeMessage {
-    Register {
-        node_id: String,
-        capabilities: Vec<NodeCapability>,
-    },
-    Result {
-        call_id: String,
-        success: bool,
-        output: String,
-        #[serde(default)]
-        error: Option<String>,
-    },
-}
-
-/// Messages sent to a node.
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum GatewayMessage {
-    Registered {
-        node_id: String,
-        capabilities_count: usize,
-    },
-    Error {
-        message: String,
-    },
-    Invoke {
-        call_id: String,
-        capability: String,
-        args: serde_json::Value,
-    },
-}
-
-/// Query parameters for the `/ws/nodes` endpoint.
-#[derive(Deserialize)]
-pub struct NodeWsQuery {
-    pub token: Option<String>,
-}
-
-/// Extract a bearer token from WebSocket-compatible sources.
-fn extract_node_ws_token<'a>(
-    headers: &'a HeaderMap,
-    query_token: Option<&'a str>,
-) -> Option<&'a str> {
-    // 1. Authorization header
-    if let Some(t) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Bearer "))
-    {
-        if !t.is_empty() {
-            return Some(t);
+        match tokio::time::timeout(self.invoke_timeout, resp_rx).await {
+            Ok(Ok(res)) => Ok(res),
+            Ok(Err(_)) => {
+                self.pending.lock().remove(&request_id);
+                Ok(NodeCommandResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("request cancelled".into()),
+                })
+            }
+            Err(_) => {
+                self.pending.lock().remove(&request_id);
+                Ok(NodeCommandResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "timeout after {}s waiting for node response",
+                        self.invoke_timeout.as_secs()
+                    )),
+                })
+            }
         }
     }
-
-    // 2. Sec-WebSocket-Protocol: bearer.<token>
-    if let Some(t) = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|protos| {
-            protos
-                .split(',')
-                .map(|p| p.trim())
-                .find_map(|p| p.strip_prefix(BEARER_SUBPROTO_PREFIX))
-        })
-    {
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-
-    // 3. ?token= query parameter
-    if let Some(t) = query_token {
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-
-    None
 }
 
-/// GET /ws/nodes — WebSocket upgrade for node connections
+/// Extension: list filtered by allowlist (for HTTP API).
+impl ConnectedNodeRegistry {
+    pub fn list_filtered(&self, allowed_node_ids: &[String]) -> Vec<NodeInfo> {
+        self.filter_by_allowlist(allowed_node_ids)
+    }
+
+    pub fn describe_filtered(
+        &self,
+        node_id: &str,
+        allowed_node_ids: &[String],
+    ) -> Option<NodeDescription> {
+        if !allowed_node_ids.is_empty()
+            && !allowed_node_ids.iter().any(|a| a == "*" || a == node_id)
+        {
+            return None;
+        }
+        self.describe(node_id)
+    }
+}
+
+
+// --------------------------------------------------
+// nodes websocket
+// --------------------------------------------------
+
+/// Interval for gateway → node tick events (milliseconds).
+/// Matches OpenClaw's TICK_INTERVAL_MS so shared clients can reuse watchdog logic.
+const NODE_TICK_INTERVAL_MS: u64 = 30_000;
+
+fn sanitize_ws_headers(headers: &HeaderMap) -> Value {
+    let mut out = serde_json::Map::new();
+    for (key, value) in headers {
+        let k = key.as_str().to_ascii_lowercase();
+        let v = value.to_str().unwrap_or("<non-utf8>");
+        let redacted = matches!(
+            k.as_str(),
+            "authorization" | "x-node-control-token" | "cookie" | "set-cookie"
+        );
+        out.insert(
+            key.as_str().to_string(),
+            Value::String(if redacted {
+                "<redacted>".to_string()
+            } else {
+                v.to_string()
+            }),
+        );
+    }
+    Value::Object(out)
+}
+/// GET / — WebSocket upgrade for node connections.
 pub async fn handle_ws_nodes(
     State(state): State<AppState>,
-    Query(params): Query<NodeWsQuery>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // Auth: check node auth token if configured
-    let nodes_config = state.config.lock().nodes.clone();
-    if let Some(ref expected_token) = nodes_config.auth_token {
-        let token = extract_node_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        if token != expected_token {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide a valid node auth token",
-            )
-                .into_response();
-        }
-    }
-
-    // Fall back to pairing auth if no node-specific token
-    if nodes_config.auth_token.is_none() && state.pairing.require_pairing() {
-        let token = extract_node_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide Authorization header or ?token= query param",
-            )
-                .into_response();
-        }
-    }
-
-    // Echo sub-protocol if client requests it
-    let ws = if headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .map_or(false, |protos| {
-            protos.split(',').any(|p| p.trim() == WS_NODE_PROTOCOL)
-        }) {
-        ws.protocols([WS_NODE_PROTOCOL])
-    } else {
-        ws
-    };
+    tracing::info!(
+        peer = %peer_addr,
+        headers = %sanitize_ws_headers(&headers),
+        "node websocket upgrade request received"
+    );
 
     let registry = state.node_registry.clone();
-    ws.on_upgrade(move |socket| handle_node_socket(socket, registry))
+    let Some(registry) = registry else {
+        tracing::warn!(
+            peer = %peer_addr,
+            "node websocket rejected: node_control is disabled"
+        );
+        return (
+            StatusCode::NOT_FOUND,
+            "Node WebSocket is disabled (node_control.enabled = false)",
+        )
+            .into_response();
+    };
+
+    // Optional token check: header X-Node-Control-Token
+    let config = state.config.lock().nodes.clone();
+    if let Some(expected) = config.auth_token.as_deref().filter(|s: &&str| !s.is_empty()) {
+        let provided = headers
+            .get("X-Node-Control-Token")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .unwrap_or("");
+        if !crate::security::pairing::constant_time_eq(expected, provided) {
+            tracing::warn!(
+                peer = %peer_addr,
+                "node websocket rejected: invalid X-Node-Control-Token"
+            );
+            return (StatusCode::UNAUTHORIZED, "Invalid X-Node-Control-Token").into_response();
+        }
+    }
+
+    tracing::info!(peer = %peer_addr, "node websocket upgrade accepted");
+    ws.on_upgrade(move |socket| handle_node_socket(socket, registry, peer_addr))
         .into_response()
 }
 
-async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
-    let (mut sender, mut receiver) = socket.split();
-    let mut registered_node_id: Option<String> = None;
-
-    // Channel for forwarding invocations to this node
-    let (invoke_tx, mut invoke_rx) = mpsc::channel::<NodeInvocation>(32);
-
-    // Pending invocation responses keyed by call_id
-    let pending: Arc<RwLock<HashMap<String, oneshot::Sender<NodeInvocationResult>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    let pending_clone = Arc::clone(&pending);
-
-    // Task to forward invocations to the node via WebSocket
-    let send_task = tokio::spawn(async move {
-        while let Some(invocation) = invoke_rx.recv().await {
-            let msg = GatewayMessage::Invoke {
-                call_id: invocation.call_id.clone(),
-                capability: invocation.capability,
-                args: invocation.args,
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if sender.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
-                pending_clone
-                    .write()
-                    .insert(invocation.call_id, invocation.response_tx);
-            }
-        }
+async fn handle_node_socket(
+    mut socket: WebSocket,
+    registry: std::sync::Arc<ConnectedNodeRegistry>,
+    peer_addr: SocketAddr,
+) {
+    // ── Step 1: send connect.challenge ─────────────────────────────
+    let nonce = Uuid::new_v4().to_string();
+    let challenge = serde_json::json!({
+        "type": "event",
+        "event": "connect.challenge",
+        "payload": { "nonce": nonce },
     });
+    if socket
+        .send(Message::Text(challenge.to_string().into()))
+        .await
+        .is_err()
+    {
+        tracing::warn!("failed to send connect.challenge to node");
+        return;
+    }
 
-    // Process incoming messages from node
-    while let Some(msg) = receiver.next().await {
-        let text = match msg {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) | Err(_) => break,
+    // ── Step 2: wait for connect request ───────────────────────────
+    let (node_id, mut out_rx) = loop {
+        let msg = match socket.recv().await {
+            Some(Ok(Message::Text(t))) => t,
+            Some(Ok(Message::Close(frame))) => {
+                tracing::info!(?frame, "node websocket closed before connect");
+                return;
+            }
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "node websocket recv error before connect");
+                return;
+            }
+            None => {
+                tracing::info!("node websocket stream ended before connect");
+                return;
+            }
             _ => continue,
         };
 
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+        let parsed: serde_json::Value = match serde_json::from_str(&msg) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => {
+                tracing::warn!(payload = %msg, "node websocket invalid JSON before connect");
+                continue;
+            }
         };
 
-        // Try to parse as NodeMessage
-        let node_msg: NodeMessage = match serde_json::from_value(parsed) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let frame_type = parsed["type"].as_str().unwrap_or("");
+        let method = parsed["method"].as_str().unwrap_or("");
+        if frame_type != "req" || method != "connect" {
+            tracing::warn!(
+                payload = %parsed,
+                "node websocket expected connect request (type=req, method=connect)"
+            );
+            continue;
+        }
+
+        let connect_id = match parsed["id"].as_str().map(str::trim) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                tracing::warn!(payload = %parsed, "node connect request missing id");
+                continue;
+            }
         };
 
-        match node_msg {
-            NodeMessage::Register {
-                node_id,
-                capabilities,
-            } => {
-                // Validate node_id
-                if node_id.is_empty() || node_id.len() > 128 {
-                    tracing::warn!("Node registration rejected: invalid node_id length");
-                    continue;
+        let params = parsed
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        // Role 分流：只接受 role = "node" 的连接，其它（例如 "operator"）直接拒绝。
+        let role = params
+            .get("role")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("node");
+
+        if role != "node" {
+            tracing::warn!(
+                role = %role,
+                params = %params,
+                "node websocket connect rejected: unsupported role"
+            );
+
+            let connect_res = serde_json::json!({
+                "type": "res",
+                "id": connect_id,
+                "ok": false,
+                "error": {
+                    "code": "invalid_request",
+                    "message": format!("unsupported role: {role} (only 'node' is allowed)"),
                 }
+            });
 
-                let caps_count = capabilities.len();
-                let info = NodeInfo {
-                    node_id: node_id.clone(),
-                    capabilities,
-                    invoke_tx: invoke_tx.clone(),
+            if let Err(error) = socket
+                .send(Message::Text(connect_res.to_string().into()))
+                .await
+            {
+                tracing::warn!(
+                    role = %role,
+                    error = %error,
+                    "failed to send role rejection response to websocket client"
+                );
+            }
+
+            return;
+        }
+
+        // Prefer device.id as node_id when present, otherwise fallback to client.id.
+        let device_id = params
+            .get("device")
+            .and_then(|d| d.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let client_id = params
+            .get("client")
+            .and_then(|c| c.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        let node_id = match device_id.or(client_id) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(payload = %params, "node connect params missing client.id/device.id");
+                continue;
+            }
+        };
+
+        // Caps + Commands as capabilities
+        let mut capabilities: Vec<String> = Vec::new();
+        if let Some(caps) = params.get("caps").and_then(|v| v.as_array()) {
+            for v in caps {
+                if let Some(s) = v.as_str().map(str::trim) {
+                    if !s.is_empty() {
+                        capabilities.push(s.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(commands) = params.get("commands").and_then(|v| v.as_array()) {
+            for v in commands {
+                if let Some(s) = v.as_str().map(str::trim) {
+                    if !s.is_empty() {
+                        capabilities.push(s.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut meta = params.clone();
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "remoteIp".to_string(),
+                serde_json::Value::String(peer_addr.ip().to_string()),
+            );
+        }
+        let meta = Some(meta);
+
+        let rx = registry.register(node_id.clone(), capabilities, meta);
+        tracing::info!(
+            node_id = %node_id,
+            connect_params = %params,
+            "node connected via gateway protocol"
+        );
+
+        // Acknowledge connect (minimal ok=true response).
+        let connect_res = serde_json::json!({
+            "type": "res",
+            "id": connect_id,
+            "ok": true,
+            "payload": {
+                "nodeId": node_id,
+            },
+        });
+        if socket
+            .send(Message::Text(connect_res.to_string().into()))
+            .await
+            .is_err()
+        {
+            tracing::warn!(node_id = %node_id, "failed to send connect response to node");
+            return;
+        }
+
+        break (node_id, rx);
+    };
+
+    // Periodic keepalive: send `event: "tick"` frames to the node so
+    // node-side watchdogs can detect stalled connections.
+    let mut tick_interval = time::interval(Duration::from_millis(NODE_TICK_INTERVAL_MS));
+    tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            // Incoming from node: node.invoke.result (req frame)
+            msg = socket.recv() => {
+                let msg = match msg {
+                    Some(Ok(Message::Text(t))) => t,
+                    Some(Ok(Message::Close(frame))) => {
+                        tracing::info!(node_id = %node_id, ?frame, "node websocket closed");
+                        break;
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(node_id = %node_id, error = %error, "node websocket recv error");
+                        break;
+                    }
+                    None => {
+                        tracing::info!(node_id = %node_id, "node websocket stream ended");
+                        break;
+                    }
+                    _ => continue,
                 };
 
-                if registry.register(info) {
-                    tracing::info!("Node registered: {node_id} with {caps_count} capabilities");
-                    registered_node_id = Some(node_id.clone());
+                let parsed: serde_json::Value = match serde_json::from_str(&msg) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::warn!(node_id = %node_id, payload = %msg, "node sent invalid JSON");
+                        continue;
+                    }
+                };
 
-                    // Send ack — we can't use `sender` here since it's moved
-                    // into the send task. Instead, send ack via the invoke channel
-                    // pattern isn't ideal. We'll use a workaround: send the ack
-                    // through a special invocation that the send task converts to
-                    // a registered message. For simplicity, we just log and the
-                    // ack is implicit in the protocol.
+                let frame_type = parsed["type"].as_str().unwrap_or("");
+                let method = parsed["method"].as_str().unwrap_or("");
+
+                if frame_type == "req" && method == "node.invoke.result" {
+                    let params = parsed.get("params").cloned().unwrap_or(serde_json::json!({}));
+                    let request_id = params["id"].as_str().unwrap_or("").to_string();
+                    if request_id.is_empty() {
+                        tracing::warn!(node_id = %node_id, payload = %params, "node.invoke.result missing id");
+                        continue;
+                    }
+
+                    let ok = params["ok"].as_bool().unwrap_or(false);
+                    let payload_json = params["payloadJSON"].as_str().map(String::from);
+                    let payload_value = params.get("payload").cloned();
+                    let error_value = params.get("error").cloned();
+
+                    let output = if let Some(pj) = payload_json {
+                        pj
+                    } else if let Some(pv) = payload_value {
+                        pv.to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    let error = error_value.map(|e| e.to_string());
+
+                    let result = NodeCommandResult {
+                        success: ok,
+                        output,
+                        error,
+                    };
+
+                    tracing::info!(
+                        node_id = %node_id,
+                        request_id = %request_id,
+                        success = result.success,
+                        "node invoke result received"
+                    );
+                    registry.complete_pending(&request_id, result);
                 } else {
-                    tracing::warn!(
-                        "Node registration rejected: registry at capacity for {node_id}"
+                    tracing::debug!(
+                        node_id = %node_id,
+                        frame_type = %frame_type,
+                        method = %method,
+                        payload = %parsed,
+                        "ignoring unsupported node frame"
                     );
                 }
             }
-            NodeMessage::Result {
-                call_id,
-                success,
-                output,
-                error,
-            } => {
-                if let Some(tx) = pending.write().remove(&call_id) {
-                    let _ = tx.send(NodeInvocationResult {
-                        success,
-                        output,
-                        error,
-                    });
+
+            // Outgoing to node: invoke or run from registry
+            out_msg = out_rx.recv() => {
+                let out = match out_msg {
+                    Some(m) => m,
+                    None => break,
+                };
+
+                let wire = match &out {
+                    OutgoingMessage::Invoke { request_id, capability, arguments } => {
+                        // Map tool "invoke" to node.invoke.request; capability becomes command.
+                        let params_json = arguments.to_string();
+                        tracing::info!(
+                            node_id = %node_id,
+                            request_id = %request_id,
+                            capability = %capability,
+                            params_json = %params_json,
+                            "sending node.invoke.request to node"
+                        );
+                        let payload = serde_json::json!({
+                            "id": request_id,
+                            "nodeId": node_id,
+                            "command": capability,
+                            "paramsJSON": params_json,
+                            "timeoutMs": 15_000i64,
+                        });
+                        serde_json::json!({
+                            "type": "event",
+                            "event": "node.invoke.request",
+                            "payload": payload
+                        })
+                    }
+                    OutgoingMessage::Run { request_id, command } => {
+                        // Map tool "run" to system.run command on node side.
+                        let params = serde_json::json!({
+                            "command": Vec::<String>::new(),
+                            "rawCommand": command,
+                        });
+                        let params_json = params.to_string();
+                        tracing::info!(
+                            node_id = %node_id,
+                            request_id = %request_id,
+                            raw_command = %command,
+                            "sending node.invoke.request(system.run) to node"
+                        );
+                        let payload = serde_json::json!({
+                            "id": request_id,
+                            "nodeId": node_id,
+                            "command": "system.run",
+                            "paramsJSON": params_json,
+                            "timeoutMs": 15_000i64,
+                        });
+                        serde_json::json!({
+                            "type": "event",
+                            "event": "node.invoke.request",
+                            "payload": payload
+                        })
+                    }
+                };
+
+                if socket.send(Message::Text(wire.to_string().into())).await.is_err() {
+                    tracing::warn!(node_id = %node_id, "failed to send gateway frame to node");
+                    break;
+                }
+            }
+
+            // Periodic tick: gateway-initiated heartbeat for node clients.
+            _ = tick_interval.tick() => {
+                let payload = serde_json::json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                });
+                let tick = serde_json::json!({
+                    "type": "event",
+                    "event": "tick",
+                    "payload": payload,
+                });
+
+                if socket.send(Message::Text(tick.to_string().into())).await.is_err() {
+                    tracing::warn!(node_id = %node_id, "failed to send tick event to node");
+                    break;
                 }
             }
         }
     }
 
-    // Cleanup: unregister node on disconnect
-    if let Some(node_id) = registered_node_id {
-        registry.unregister(&node_id);
-        tracing::info!("Node disconnected and unregistered: {node_id}");
-    }
-
-    send_task.abort();
+    registry.unregister(&node_id);
+    tracing::info!(node_id = %node_id, "node disconnected");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn node_registry_register_and_unregister() {
-        let registry = NodeRegistry::new(10);
-        let (tx, _rx) = mpsc::channel(1);
-
-        let info = NodeInfo {
-            node_id: "test-node".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "ping".to_string(),
-                description: "Ping test".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx,
-        };
-
-        assert!(registry.register(info));
-        assert!(registry.contains("test-node"));
-        assert_eq!(registry.len(), 1);
-
-        registry.unregister("test-node");
-        assert!(!registry.contains("test-node"));
-        assert_eq!(registry.len(), 0);
-    }
-
-    #[test]
-    fn node_registry_capacity_limit() {
-        let registry = NodeRegistry::new(2);
-
-        for i in 0..2 {
-            let (tx, _rx) = mpsc::channel(1);
-            let info = NodeInfo {
-                node_id: format!("node-{i}"),
-                capabilities: vec![],
-                invoke_tx: tx,
-            };
-            assert!(registry.register(info));
-        }
-
-        let (tx, _rx) = mpsc::channel(1);
-        let info = NodeInfo {
-            node_id: "node-overflow".to_string(),
-            capabilities: vec![],
-            invoke_tx: tx,
-        };
-        assert!(!registry.register(info));
-        assert_eq!(registry.len(), 2);
-    }
-
-    #[test]
-    fn node_registry_re_register_same_id() {
-        let registry = NodeRegistry::new(2);
-        let (tx1, _rx1) = mpsc::channel(1);
-        let (tx2, _rx2) = mpsc::channel(1);
-
-        let info1 = NodeInfo {
-            node_id: "node-1".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "old".to_string(),
-                description: "Old cap".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx1,
-        };
-        assert!(registry.register(info1));
-
-        let info2 = NodeInfo {
-            node_id: "node-1".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "new".to_string(),
-                description: "New cap".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx2,
-        };
-        // Re-registering same node_id should succeed (update)
-        assert!(registry.register(info2));
-        assert_eq!(registry.len(), 1);
-
-        let caps = registry.all_capabilities();
-        assert_eq!(caps.len(), 1);
-        assert_eq!(caps[0].2.name, "new");
-    }
-
-    #[test]
-    fn node_registry_all_capabilities() {
-        let registry = NodeRegistry::new(10);
-        let (tx1, _rx1) = mpsc::channel(1);
-        let (tx2, _rx2) = mpsc::channel(1);
-
-        registry.register(NodeInfo {
-            node_id: "phone-1".to_string(),
-            capabilities: vec![
-                NodeCapability {
-                    name: "camera.snap".to_string(),
-                    description: "Take a photo".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {}}),
-                },
-                NodeCapability {
-                    name: "gps.location".to_string(),
-                    description: "Get GPS location".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {}}),
-                },
-            ],
-            invoke_tx: tx1,
-        });
-
-        registry.register(NodeInfo {
-            node_id: "sensor-1".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "temp.read".to_string(),
-                description: "Read temperature".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx2,
-        });
-
-        let caps = registry.all_capabilities();
-        assert_eq!(caps.len(), 3);
-    }
-
-    #[test]
-    fn node_registry_is_empty() {
-        let registry = NodeRegistry::new(10);
-        assert!(registry.is_empty());
-
-        let (tx, _rx) = mpsc::channel(1);
-        registry.register(NodeInfo {
-            node_id: "n".to_string(),
-            capabilities: vec![],
-            invoke_tx: tx,
-        });
-        assert!(!registry.is_empty());
-    }
-
-    #[test]
-    fn node_capability_deserialize() {
-        let json = r#"{"name":"camera.snap","description":"Take a photo"}"#;
-        let cap: NodeCapability = serde_json::from_str(json).unwrap();
-        assert_eq!(cap.name, "camera.snap");
-        assert_eq!(cap.description, "Take a photo");
-        // Default parameters
-        assert_eq!(cap.parameters["type"], "object");
-    }
-
-    #[test]
-    fn node_message_register_deserialize() {
-        let json = r#"{"type":"register","node_id":"phone-1","capabilities":[{"name":"camera.snap","description":"Take a photo","parameters":{"type":"object","properties":{"resolution":{"type":"string"}}}}]}"#;
-        let msg: NodeMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            NodeMessage::Register {
-                node_id,
-                capabilities,
-            } => {
-                assert_eq!(node_id, "phone-1");
-                assert_eq!(capabilities.len(), 1);
-                assert_eq!(capabilities[0].name, "camera.snap");
-            }
-            NodeMessage::Result { .. } => panic!("Expected Register message"),
-        }
-    }
-
-    #[test]
-    fn node_message_result_deserialize() {
-        let json = r#"{"type":"result","call_id":"abc-123","success":true,"output":"photo taken"}"#;
-        let msg: NodeMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            NodeMessage::Result {
-                call_id,
-                success,
-                output,
-                error,
-            } => {
-                assert_eq!(call_id, "abc-123");
-                assert!(success);
-                assert_eq!(output, "photo taken");
-                assert!(error.is_none());
-            }
-            NodeMessage::Register { .. } => panic!("Expected Result message"),
-        }
-    }
-
-    #[test]
-    fn gateway_message_serialize() {
-        let msg = GatewayMessage::Registered {
-            node_id: "phone-1".to_string(),
-            capabilities_count: 3,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"registered\""));
-        assert!(json.contains("\"node_id\":\"phone-1\""));
-        assert!(json.contains("\"capabilities_count\":3"));
-    }
-
-    #[test]
-    fn gateway_invoke_message_serialize() {
-        let msg = GatewayMessage::Invoke {
-            call_id: "call-1".to_string(),
-            capability: "camera.snap".to_string(),
-            args: serde_json::json!({"resolution": "1080p"}),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"invoke\""));
-        assert!(json.contains("\"capability\":\"camera.snap\""));
-    }
-
-    #[test]
-    fn extract_node_ws_token_from_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer node_tok_123".parse().unwrap());
-        assert_eq!(extract_node_ws_token(&headers, None), Some("node_tok_123"));
-    }
-
-    #[test]
-    fn extract_node_ws_token_from_query() {
-        let headers = HeaderMap::new();
-        assert_eq!(
-            extract_node_ws_token(&headers, Some("node_tok_456")),
-            Some("node_tok_456")
-        );
-    }
-
-    #[test]
-    fn extract_node_ws_token_none_when_empty() {
-        let headers = HeaderMap::new();
-        assert_eq!(extract_node_ws_token(&headers, None), None);
-    }
-}
