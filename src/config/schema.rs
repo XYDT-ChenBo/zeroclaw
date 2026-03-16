@@ -603,7 +603,7 @@ impl Default for McpConfig {
 /// Configuration for the dynamic node discovery system (`[nodes]`).
 ///
 /// When enabled, external processes/devices can connect via WebSocket
-/// at `/ws/nodes` and advertise their capabilities at runtime.
+/// at `/` and advertise their capabilities at runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NodesConfig {
     /// Enable dynamic node discovery endpoint.

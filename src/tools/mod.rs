@@ -95,7 +95,7 @@ pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
 pub use model_routing_config::ModelRoutingConfigTool;
 #[allow(unused_imports)]
-pub use node_tool::NodeTool;
+pub use node_tool::NodesTool;
 pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
@@ -113,6 +113,7 @@ pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 
 use crate::config::{Config, DelegateAgentConfig};
+use crate::gateway::nodes::ConnectedNodeRegistry;
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::SecurityPolicy;
@@ -328,6 +329,11 @@ pub fn all_tools_with_runtime(
             web_fetch_config.max_response_size,
             web_fetch_config.timeout_secs,
         )));
+    }
+    println!("Adding NodesTool{}", config.nodes.enabled.to_string());
+    if config.nodes.enabled {
+        println!("Adding NodesTool");
+        tool_arcs.push(Arc::new(NodesTool::new(ConnectedNodeRegistry::global(), workspace_dir)));
     }
 
     // Web search tool (enabled by default for GLM and other models)
