@@ -12,6 +12,36 @@ use uuid::Uuid;
 
 use crate::gateway::AppState;
 
+const THINK_OPEN_TAG: &str = "<think>";
+const THINK_CLOSE_TAG: &str = "</think>";
+
+#[derive(Default)]
+struct HttpStreamFormatState {
+    think_started: bool,
+    think_closed: bool,
+}
+
+fn format_http_stream_chunk(chunk: &str, state: &mut HttpStreamFormatState) -> Option<String> {
+    if chunk == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
+        if state.think_started && !state.think_closed {
+            state.think_closed = true;
+            return Some(THINK_CLOSE_TAG.to_string());
+        }
+        return None;
+    }
+
+    if state.think_closed {
+        return Some(chunk.to_string());
+    }
+
+    if !state.think_started {
+        state.think_started = true;
+        return Some(format!("{THINK_OPEN_TAG}{chunk}"));
+    }
+
+    Some(chunk.to_string())
+}
+
 /// OpenAI-compatible chat message.
 #[derive(Deserialize)]
 pub struct OpenAiChatMessage {
@@ -234,7 +264,11 @@ async fn respond_streaming(
 
     let id = req.id.clone();
     let created = req.created;
+    let mut format_state = HttpStreamFormatState::default();
     let stream = ReceiverStream::new(rx)
+        .filter_map(move |chunk| {
+            std::future::ready(format_http_stream_chunk(&chunk, &mut format_state))
+        })
         .enumerate()
         .map({
             let id = id.clone();
@@ -296,5 +330,42 @@ pub async fn handle_http_response(
         respond_streaming(state, req).await
     } else {
         respond_non_streaming(state, req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpStreamFormatState, format_http_stream_chunk};
+
+    #[test]
+    fn streaming_http_response_wraps_thinking_phase_in_think_tags() {
+        let mut state = HttpStreamFormatState::default();
+
+        assert_eq!(
+            format_http_stream_chunk("🤔 Thinking...\n", &mut state),
+            Some("<think>🤔 Thinking...\n".to_string())
+        );
+        assert_eq!(
+            format_http_stream_chunk("⏳ shell: ls\n", &mut state),
+            Some("⏳ shell: ls\n".to_string())
+        );
+        assert_eq!(
+            format_http_stream_chunk(crate::agent::loop_::DRAFT_CLEAR_SENTINEL, &mut state),
+            Some("</think>".to_string())
+        );
+        assert_eq!(
+            format_http_stream_chunk("最终答案", &mut state),
+            Some("最终答案".to_string())
+        );
+    }
+
+    #[test]
+    fn streaming_http_response_ignores_clear_sentinel_before_thinking_starts() {
+        let mut state = HttpStreamFormatState::default();
+
+        assert_eq!(
+            format_http_stream_chunk(crate::agent::loop_::DRAFT_CLEAR_SENTINEL, &mut state),
+            None
+        );
     }
 }
