@@ -600,6 +600,7 @@ async fn handle_node_socket(
         break (node_id, rx);
     };
 
+    
     // Periodic keepalive: send `event: "tick"` frames to the node so
     // node-side watchdogs can detect stalled connections.
     let mut tick_interval = time::interval(Duration::from_millis(NODE_TICK_INTERVAL_MS));
