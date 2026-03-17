@@ -6419,6 +6419,8 @@ pub struct BotServiceConfig {
     /// Optional account identifier forwarded via X-Emp-No header during WebSocket handshake.
     #[serde(default)]
     pub account_id: Option<String>,
+    #[serde(default)]
+    pub http_proxy: Option<String>,
     /// Allowed chat UUIDs or "*" for all. Values are matched against inbound `chatUuid`.
     #[serde(default)]
     pub allowed_from: Vec<String>,
