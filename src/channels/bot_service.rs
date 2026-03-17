@@ -21,13 +21,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{client_async, connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 /// Full WebSocket stream type (TLS or plain TCP).
@@ -185,6 +186,64 @@ impl BotServiceChannel {
         Ok(raw.to_string())
     }
 
+    /// Parse "ws://host[:port]/..." into (host, port). Defaults to 80 when port is omitted.
+    fn parse_ws_host_port(ws_url: &str) -> Result<(String, u16)> {
+        let without_scheme = ws_url
+            .strip_prefix("ws://")
+            .or_else(|| ws_url.strip_prefix("wss://"))
+            .ok_or_else(|| anyhow!("invalid WebSocket URL scheme: {ws_url}"))?;
+
+        let host_port = without_scheme
+            .split('/')
+            .next()
+            .ok_or_else(|| anyhow!("missing host in WebSocket URL: {ws_url}"))?;
+
+        let mut parts = host_port.splitn(2, ':');
+        let host = parts
+            .next()
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| anyhow!("missing host in WebSocket URL: {ws_url}"))?
+            .to_string();
+        let port = match parts.next() {
+            Some(p) => p
+                .parse::<u16>()
+                .map_err(|_| anyhow!("invalid port in WebSocket URL: {ws_url}"))?,
+            None => {
+                if ws_url.starts_with("wss://") {
+                    443
+                } else {
+                    80
+                }
+            }
+        };
+
+        Ok((host, port))
+    }
+
+    /// Parse "http://proxy:port" / "https://proxy:port" / "proxy:port" into (host, port).
+    fn parse_proxy_host_port(proxy: &str) -> Result<(String, u16)> {
+        let trimmed = proxy.trim();
+        let without_scheme = trimmed
+            .strip_prefix("http://")
+            .or_else(|| trimmed.strip_prefix("https://"))
+            .unwrap_or(trimmed);
+
+        let mut parts = without_scheme.splitn(2, ':');
+        let host = parts
+            .next()
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| anyhow!("invalid http_proxy host: {proxy}"))?
+            .to_string();
+        let port = match parts.next() {
+            Some(p) => p
+                .parse::<u16>()
+                .map_err(|_| anyhow!("invalid http_proxy port: {proxy}"))?,
+            None => 8080,
+        };
+
+        Ok((host, port))
+    }
+
     /// Establish the WebSocket connection, then split into write/read halves and
     /// store them in conn_write / conn_read so read_loop and send() never contend
     /// on the same Mutex.
@@ -198,8 +257,79 @@ impl BotServiceChannel {
                 }
             }
         }
+        let res = if let Some(proxy) = self.cfg.http_proxy.as_deref().map(str::trim) {
+            let proxy = proxy.to_string();
+            if ws_url.starts_with("wss://") {
+                return Err(anyhow!(
+                    "bot_service http_proxy currently only supports ws:// URLs (got wss://)"
+                ));
+            }
 
-        let res = connect_async(request).await;
+            let (proxy_host, proxy_port) = Self::parse_proxy_host_port(&proxy)?;
+            let (target_host, target_port) = Self::parse_ws_host_port(&ws_url)?;
+            let proxy_addr = format!("{proxy_host}:{proxy_port}");
+
+            tracing::info!(
+                target: "bot_service",
+                "Connecting via HTTP proxy {} to {}:{}",
+                proxy_addr,
+                target_host,
+                target_port
+            );
+
+            let mut stream = TcpStream::connect(&proxy_addr).await.map_err(|err| {
+                anyhow!(
+                    "failed to connect to http_proxy {}: {}",
+                    proxy_addr,
+                    err
+                )
+            })?;
+
+            // Minimal HTTP CONNECT tunnel; no proxy auth support for now.
+            let connect_req = format!(
+                "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n",
+                host = target_host,
+                port = target_port
+            );
+            stream
+                .write_all(connect_req.as_bytes())
+                .await
+                .map_err(|err| anyhow!("failed to write CONNECT to proxy {}: {}", proxy_addr, err))?;
+
+            let mut buf = Vec::with_capacity(1024);
+            let mut tmp = [0u8; 256];
+            loop {
+                let n = stream
+                    .read(&mut tmp)
+                    .await
+                    .map_err(|err| anyhow!("failed to read CONNECT response from proxy {}: {}", proxy_addr, err))?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if buf.len() > 8 * 1024 {
+                    break;
+                }
+            }
+
+            let resp = String::from_utf8_lossy(&buf);
+            let status_line = resp.lines().next().unwrap_or_default();
+            if !status_line.starts_with("HTTP/1.1 200") && !status_line.starts_with("HTTP/1.0 200")
+            {
+                return Err(anyhow!(
+                    "http_proxy CONNECT failed: {}",
+                    status_line.to_string()
+                ));
+            }
+
+            let tls_stream = MaybeTlsStream::Plain(stream);
+            client_async(request, tls_stream).await
+        } else {
+            connect_async(request).await
+        };
         match res {
             Ok((stream, _)) => {
                 let (write_half, read_half) = stream.split();
