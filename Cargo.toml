@@ -74,7 +74,8 @@ prometheus = { version = "0.14", default-features = false, optional = true }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
-# URL encoding for web search
+# URL handling / encoding for web search and proxies
+url = "2.5"
 urlencoding = "2.1"
 
 # HTML to plain text conversion (web_fetch tool)

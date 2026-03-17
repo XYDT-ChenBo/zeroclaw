@@ -3,11 +3,20 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as ProstMessage;
+use rustls::{ClientConfig, RootCertStore};
+use rustls_pki_types::DnsName;
 use std::collections::HashMap;
+use std::env;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::RwLock;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
+use tokio_tungstenite::{client_async, WebSocketStream};
+use url::Url;
 use uuid::Uuid;
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
@@ -97,6 +106,115 @@ impl LarkPlatform {
             Self::Feishu => "feishu",
         }
     }
+}
+
+/// Resolve a HTTP proxy from standard environment variables.
+/// Supports `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`.
+fn resolve_http_proxy_from_env() -> Option<String> {
+    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(val) = env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parse `http://user:pass@host:port/...`-style proxy URL into (host, port).
+fn parse_proxy_host_port(proxy: &str) -> Option<(String, u16)> {
+    // Strip scheme if present
+    let without_scheme = if let Some(pos) = proxy.find("://") {
+        &proxy[pos + 3..]
+    } else {
+        proxy
+    };
+    // Strip path
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    // Strip credentials
+    let host_port = host_port.split('@').last().unwrap_or(host_port);
+    let mut parts = host_port.split(':');
+    let host = parts.next()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let port = parts
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(80);
+    Some((host.to_string(), port))
+}
+
+/// Establish a TLS WebSocket connection to `wss_url`, optionally via HTTP CONNECT proxy.
+async fn connect_lark_ws(wss_url: &str) -> anyhow::Result<WebSocketStream<TlsStream<TcpStream>>> {
+    let url = Url::parse(wss_url)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Lark WS URL missing host: {wss_url}"))?
+        .to_string();
+    let port = url.port().unwrap_or(443);
+
+    let proxy = resolve_http_proxy_from_env();
+    let tcp = if let Some(proxy_str) = proxy {
+        if let Some((proxy_host, proxy_port)) = parse_proxy_host_port(&proxy_str) {
+            let addr = format!("{proxy_host}:{proxy_port}");
+            tracing::info!("Lark: connecting to WS via HTTP proxy {addr}");
+            let mut stream = TcpStream::connect(&addr).await?;
+
+            let connect_req = format!(
+                "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+            );
+            stream.write_all(connect_req.as_bytes()).await?;
+            stream.flush().await?;
+
+            // Read response headers until CRLF CRLF
+            let mut buf = Vec::with_capacity(1024);
+            loop {
+                let mut tmp = [0u8; 256];
+                let n = stream.read(&mut tmp).await?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if buf.len() > 8192 {
+                    break;
+                }
+            }
+            let resp = String::from_utf8_lossy(&buf);
+            if !resp.starts_with("HTTP/1.1 200") && !resp.starts_with("HTTP/1.0 200") {
+                anyhow::bail!("Lark: HTTP proxy CONNECT failed: {resp}");
+            }
+
+            stream
+        } else {
+            tracing::warn!("Lark: failed to parse proxy URL '{proxy_str}', connecting directly");
+            TcpStream::connect(format!("{host}:{port}")).await?
+        }
+    } else {
+        TcpStream::connect(format!("{host}:{port}")).await?
+    };
+
+    // TLS handshake using rustls + webpki roots (same pattern as email channel)
+    let certs = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+    };
+    let config = ClientConfig::builder()
+        .with_root_certificates(certs)
+        .with_no_client_auth();
+    let tls_connector: TlsConnector = std::sync::Arc::new(config).into();
+    let host_for_sni = host.clone();
+    let sni: DnsName = host_for_sni
+        .clone()
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("invalid Lark WS host for SNI: {}: {}", host_for_sni, e))?;
+    let tls_stream = tls_connector.connect(sni.into(), tcp).await?;
+
+    let (ws_stream, _resp) = client_async(wss_url, tls_stream).await?;
+    Ok(ws_stream)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -392,6 +510,8 @@ pub struct LarkChannel {
     platform: LarkPlatform,
     /// How to receive events: WebSocket long-connection or HTTP webhook.
     receive_mode: crate::config::schema::LarkReceiveMode,
+    /// Whether WS should respect HTTP(S)_PROXY env vars (config.use_proxy).
+    ws_use_proxy: bool,
     /// Cached tenant access token
     tenant_token: Arc<RwLock<Option<CachedTenantToken>>>,
     /// Dedup set: WS message_ids seen in last ~30 min to prevent double-dispatch
@@ -439,6 +559,7 @@ impl LarkChannel {
             mention_only,
             platform,
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
+            ws_use_proxy: false,
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
             proxy_url: None,
@@ -700,9 +821,41 @@ impl LarkChannel {
                     .and_then(|v| v.parse::<i32>().ok())
             })
             .unwrap_or(0);
-        tracing::info!("Lark: connecting to {wss_url}");
+        tracing::info!("Lark: connecting to {wss_url} (use_proxy={})", self.ws_use_proxy);
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&wss_url).await?;
+        let ws_stream = if self.ws_use_proxy {
+            // 带 HTTP(S)_PROXY 支持：通过环境变量解析代理，使用 CONNECT 隧道 + TLS。
+            connect_lark_ws(&wss_url).await?
+        } else {
+            // 不走代理：直接 TcpStream + rustls TLS + client_async。
+            // 这里的实现和 connect_lark_ws 内部的「无代理路径」保持一致，
+            // 保证返回类型相同（WebSocketStream<TlsStream<TcpStream>>）。
+            let url = Url::parse(&wss_url)?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("Lark WS URL missing host: {wss_url}"))?
+                .to_string();
+            let port = url.port().unwrap_or(443);
+
+            let tcp = TcpStream::connect(format!("{host}:{port}")).await?;
+
+            let certs = RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+            };
+            let config = ClientConfig::builder()
+                .with_root_certificates(certs)
+                .with_no_client_auth();
+            let tls_connector: TlsConnector = std::sync::Arc::new(config).into();
+            let host_for_sni = host.clone();
+            let sni: DnsName = host_for_sni
+                .clone()
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("invalid Lark WS host for SNI: {}: {}", host_for_sni, e))?;
+            let tls_stream = tls_connector.connect(sni.into(), tcp).await?;
+
+            let (ws_stream, _resp) = client_async(&wss_url, tls_stream).await?;
+            ws_stream
+        };
         let (mut write, mut read) = ws_stream.split();
         tracing::info!("Lark: WS connected (service_id={service_id})");
 
