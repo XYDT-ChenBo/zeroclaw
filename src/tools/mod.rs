@@ -36,6 +36,7 @@ pub mod cron_update;
 pub mod data_management;
 pub mod delegate;
 pub mod discord_search;
+pub mod channel_send;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -153,6 +154,7 @@ pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
 pub use reaction::{ChannelMapHandle, ReactionTool};
 pub use read_skill::ReadSkillTool;
+pub use channel_send::ChannelSendTool;
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
@@ -394,6 +396,10 @@ pub fn all_tools_with_runtime(
         Arc::new(CalculatorTool::new()),
         Arc::new(WeatherTool::new()),
         Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
+        Arc::new(ChannelSendTool::new(
+            config.clone(),
+            security.clone(),
+        )),
     ];
 
     // Register discord_search if discord_history channel is configured
