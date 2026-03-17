@@ -80,6 +80,7 @@ mod skills;
 mod tools;
 mod tunnel;
 mod util;
+mod nodes;
 
 use config::Config;
 
@@ -450,6 +451,33 @@ Examples:
         /// Target shell
         #[arg(value_enum)]
         shell: CompletionShell,
+    },
+
+    /// Connect this machine as nodes to a ZeroClaw gateway
+    Nodes {
+        /// Initialize node identity/config only (no WebSocket connection)
+        #[arg(long)]
+        init: bool,
+
+        /// Optional node config file (JSON)
+        #[arg(long)]
+        config: Option<String>,
+
+        /// Gateway host (defaults to config gateway.host)
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Gateway port (defaults to config gateway.port)
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Logical node name / display name (defaults to system hostname)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Optional node-control token (overrides identity file)
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -1169,6 +1197,17 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+
+        Commands::Nodes {
+            init,
+            config: node_config_path,
+            host,
+            port,
+            name,
+            token,
+        } => {
+            nodes::run_node(&config, init, node_config_path, host, port, name, token).await
+        }
     }
 }
 

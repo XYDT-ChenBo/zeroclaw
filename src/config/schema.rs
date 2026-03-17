@@ -3248,6 +3248,11 @@ pub struct BotServiceConfig {
     /// Optional account identifier forwarded via X-Emp-No header during WebSocket handshake.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Optional HTTP proxy URL (e.g. "http://proxy:8080") used for WebSocket CONNECT.
+    /// If set, ws:// URLs will be tunneled via this proxy. wss:// with proxy is
+    /// currently not supported and will result in a connection error.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
     /// Allowed chat UUIDs or "*" for all. Values are matched against inbound `chatUuid`.
     #[serde(default)]
     pub allowed_from: Vec<String>,
