@@ -3533,6 +3533,11 @@ pub struct FeishuConfig {
     /// Allowed user IDs or union IDs (empty = deny all, "*" = allow all)
     #[serde(default)]
     pub allowed_users: Vec<String>,
+    /// When true, WebSocket connections will honor standard HTTP(S)_PROXY
+    /// environment variables. When false (default), WS connects directly even
+    /// if proxies are configured for HTTP traffic.
+    #[serde(default)]
+    pub use_proxy: bool,
     /// Event receive mode: "websocket" (default) or "webhook"
     #[serde(default)]
     pub receive_mode: LarkReceiveMode,
