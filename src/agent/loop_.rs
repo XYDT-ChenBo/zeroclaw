@@ -2051,10 +2051,17 @@ async fn execute_one_tool(
 ) -> Result<ToolExecutionOutcome> {
     let args_summary = {
         let raw = call_arguments.to_string();
-        if raw.len() > 300 {
-            format!("{}…", &raw[..300])
-        } else {
+        // Safely truncate to ~300 bytes without splitting UTF-8 characters.
+        const MAX_BYTES: usize = 300;
+        if raw.len() <= MAX_BYTES {
             raw
+        } else {
+            let mut end = MAX_BYTES;
+            while !raw.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            let safe = &raw[..end];
+            format!("{safe}…")
         }
     };
     observer.record_event(&ObserverEvent::ToolCallStart {

@@ -27,6 +27,7 @@ pub mod cron_run;
 pub mod cron_runs;
 pub mod cron_update;
 pub mod delegate;
+pub mod channel_send;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -88,6 +89,7 @@ pub use nodes::{NodeCommandResult, NodeDescription, NodeInfo, NodeRegistry, Node
 pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
+pub use channel_send::ChannelSendTool;
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
@@ -241,6 +243,10 @@ pub fn all_tools_with_runtime(
         Arc::new(PushoverTool::new(
             security.clone(),
             workspace_dir.to_path_buf(),
+        )),
+        Arc::new(ChannelSendTool::new(
+            config.clone(),
+            security.clone(),
         )),
     ];
 
