@@ -7824,6 +7824,7 @@ mod tests {
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec!["*".into()],
+            use_proxy: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,
             proxy_url: None,
