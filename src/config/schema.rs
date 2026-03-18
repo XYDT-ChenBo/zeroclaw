@@ -1005,6 +1005,9 @@ pub struct GatewayConfig {
     /// Enable node control (WebSocket nodes + nodes tool)
     #[serde(default)]
     pub node_control: NodeControlConfig,
+    /// Agent-to-Agent integration switches (`[gateway.a2a]` section).
+    #[serde(default)]
+    pub a2a: A2aConfig,
 }
 
 /// Node control configuration (`[gateway.node_control]` section).
@@ -1028,6 +1031,34 @@ impl Default for NodeControlConfig {
             enabled: false,
             allowed_node_ids: Vec::new(),
             auth_token: None,
+        }
+    }
+}
+
+/// Agent-to-Agent integration configuration (`[gateway.a2a]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2aConfig {
+    /// Enable A2A endpoints.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enable A2A streaming surface.
+    #[serde(default = "default_a2a_stream_enabled")]
+    pub stream_enabled: bool,
+    /// Reserved auth switch. Keep false in MVP.
+    #[serde(default)]
+    pub auth_enabled: bool,
+}
+
+fn default_a2a_stream_enabled() -> bool {
+    true
+}
+
+impl Default for A2aConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stream_enabled: default_a2a_stream_enabled(),
+            auth_enabled: false,
         }
     }
 }
@@ -1079,6 +1110,7 @@ impl Default for GatewayConfig {
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             node_control: NodeControlConfig::default(),
+            a2a: A2aConfig::default(),
         }
     }
 }
@@ -5630,6 +5662,9 @@ mod tests {
         assert_eq!(c.provider_timeout_secs, 120);
         assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
         assert!(c.config_path.to_string_lossy().contains("config.toml"));
+        assert!(!c.gateway.a2a.enabled);
+        assert!(c.gateway.a2a.stream_enabled);
+        assert!(!c.gateway.a2a.auth_enabled);
     }
 
     #[test]
@@ -5660,6 +5695,7 @@ mod tests {
         assert!(properties.contains_key("default_provider"));
         assert!(properties.contains_key("skills"));
         assert!(properties.contains_key("gateway"));
+        assert!(!properties.contains_key("a2a"));
         assert!(properties.contains_key("channels_config"));
         assert!(!properties.contains_key("workspace_dir"));
         assert!(!properties.contains_key("config_path"));
@@ -6780,6 +6816,7 @@ channel_id = "C123"
             idempotency_ttl_secs: 600,
             idempotency_max_keys: 4096,
             node_control: NodeControlConfig::default(),
+            a2a: A2aConfig::default(),
         };
         let toml_str = toml::to_string(&g).unwrap();
         let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();
