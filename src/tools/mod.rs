@@ -28,6 +28,7 @@ pub mod cron_run;
 pub mod cron_runs;
 pub mod cron_update;
 pub mod delegate;
+pub mod channel_send;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -50,7 +51,7 @@ pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
 pub mod model_routing_config;
-pub mod node_tool;
+pub mod nodes;
 pub mod pdf_read;
 pub mod proxy_config;
 pub mod pushover;
@@ -96,11 +97,11 @@ pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
 pub use model_routing_config::ModelRoutingConfigTool;
-#[allow(unused_imports)]
-pub use node_tool::NodeTool;
+pub use nodes::{NodeCommandResult, NodeDescription, NodeInfo, NodeRegistry, NodesTool};
 pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
+pub use channel_send::ChannelSendTool;
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
@@ -119,6 +120,7 @@ use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::SecurityPolicy;
+use crate::_nodes::ConnectedNodeRegistry;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -284,7 +286,18 @@ pub fn all_tools_with_runtime(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
+        Arc::new(ChannelSendTool::new(
+            config.clone(),
+            security.clone(),
+        )),
     ];
+
+    if config.gateway.node_control.enabled {
+        tool_arcs.push(Arc::new(NodesTool::new(
+            ConnectedNodeRegistry::global(),
+            workspace_dir,
+        )));
+    }
 
     if browser_config.enabled {
         // Add legacy browser_open tool for simple URL opening

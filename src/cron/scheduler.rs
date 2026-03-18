@@ -1,3 +1,5 @@
+#[cfg(feature = "channel-lark")]
+use crate::channels::LarkChannel;
 #[cfg(feature = "channel-matrix")]
 use crate::channels::MatrixChannel;
 use crate::channels::{
@@ -379,46 +381,15 @@ pub(crate) async fn deliver_announcement(
             );
             channel.send(&SendMessage::new(output, target)).await?;
         }
-        "signal" => {
-            let sg = config
+        #[cfg(feature = "channel-lark")]
+        "feishu" => {
+            let fs = config
                 .channels_config
-                .signal
+                .feishu
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("signal channel not configured"))?;
-            let channel = SignalChannel::new(
-                sg.http_url.clone(),
-                sg.account.clone(),
-                sg.group_id.clone(),
-                sg.allowed_from.clone(),
-                sg.ignore_attachments,
-                sg.ignore_stories,
-            );
+                .ok_or_else(|| anyhow::anyhow!("feishu channel not configured"))?;
+            let channel = LarkChannel::from_feishu_config(fs);
             channel.send(&SendMessage::new(output, target)).await?;
-        }
-        "matrix" => {
-            #[cfg(feature = "channel-matrix")]
-            {
-                let mx = config
-                    .channels_config
-                    .matrix
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("matrix channel not configured"))?;
-                let room_id = resolve_matrix_delivery_room(&mx.room_id, target);
-                let channel = MatrixChannel::new_with_session_hint_and_zeroclaw_dir(
-                    mx.homeserver.clone(),
-                    mx.access_token.clone(),
-                    room_id,
-                    mx.allowed_users.clone(),
-                    mx.user_id.clone(),
-                    mx.device_id.clone(),
-                    config.config_path.parent().map(|path| path.to_path_buf()),
-                );
-                channel.send(&SendMessage::new(output, target)).await?;
-            }
-            #[cfg(not(feature = "channel-matrix"))]
-            {
-                anyhow::bail!("matrix delivery channel requires `channel-matrix` feature");
-            }
         }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }

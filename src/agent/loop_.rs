@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -187,7 +187,7 @@ pub(crate) fn scrub_credentials(input: &str) -> String {
 const DEFAULT_MAX_HISTORY_MESSAGES: usize = 50;
 
 /// Keep this many most-recent non-system messages after compaction.
-const COMPACTION_KEEP_RECENT_MESSAGES: usize = 20;
+const COMPACTION_KEEP_RECENT_MESSAGES: usize = 5;
 
 /// Safety cap for compaction source transcript passed to the summarizer.
 const COMPACTION_MAX_SOURCE_CHARS: usize = 12_000;
@@ -213,6 +213,7 @@ pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
 /// Sentinel value sent through on_delta to signal the draft updater to clear accumulated text.
 /// Used before streaming the final answer so progress lines are replaced by the clean response.
 pub(crate) const DRAFT_CLEAR_SENTINEL: &str = "\x00CLEAR\x00";
+
 
 /// Extract a short hint from tool call arguments for progress display.
 fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len: usize) -> String {
@@ -249,6 +250,51 @@ fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<serde_json::V
 
 fn autosave_memory_key(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
+}
+
+/// Session ID must be path-safe (alphanumeric, hyphen, underscore, no path traversal).
+fn is_safe_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.contains("..")
+        && !s.contains('/')
+        && !s.contains('\\')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Load prior conversation history from sessions/{session_id}.json.
+/// Returns at most `max_history_messages` most recent messages (no system). Empty on missing/error.
+fn load_session_history(
+    workspace_dir: &Path,
+    session_id: &str,
+    max_history_messages: usize,
+) -> Vec<ChatMessage> {
+    let path = workspace_dir
+        .join("sessions")
+        .join(format!("{session_id}.json"));
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+    let mut prior: Vec<ChatMessage> = serde_json::from_str(&data).unwrap_or_default();
+    if prior.len() > max_history_messages {
+        prior.drain(..prior.len() - max_history_messages);
+    }
+    prior
+}
+
+/// Save conversation history to sessions/{session_id}.json.
+fn save_session_history(
+    workspace_dir: &Path,
+    session_id: &str,
+    history: &[ChatMessage],
+) -> Result<()> {
+    let dir = workspace_dir.join("sessions");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{session_id}.json"));
+    let data = serde_json::to_string_pretty(history)?;
+    std::fs::write(path, data)?;
+    Ok(())
 }
 
 /// Trim conversation history to prevent unbounded growth.
@@ -292,7 +338,10 @@ fn apply_compaction_summary(
     summary: &str,
 ) {
     let summary_msg = ChatMessage::assistant(format!("[Compaction summary]\n{}", summary.trim()));
-    history.splice(start..compact_end, std::iter::once(summary_msg));
+    // Remove the compacted segment from its original position and append the
+    // summary to the end so that persisted histories place summaries last.
+    history.drain(start..compact_end);
+    history.push(summary_msg);
 }
 
 async fn auto_compact_history(
@@ -336,7 +385,26 @@ async fn auto_compact_history(
     let to_compact: Vec<ChatMessage> = history[start..compact_end].to_vec();
     let transcript = build_compaction_transcript(&to_compact);
 
-    let summarizer_system = "You are a conversation compaction engine. Summarize older chat history into concise context for future turns. Preserve: user preferences, commitments, decisions, unresolved tasks, key facts. Omit: filler, repeated chit-chat, verbose tool logs. Output plain text bullet points only.";
+    let summarizer_system = "You are a conversation compaction engine. Turn older chat history into concise, actionable context that helps complete similar tasks faster next time.
+Must preserve and highlight:
+- User preferences, tone, length, language, output format habits
+- All commitments, final decisions, agreed plans
+- Unresolved tasks / to-dos with status
+- Core facts, entities, data points
+- Most frequent command patterns and shortcuts the user uses
+- Detailed, repeatable execution steps for recurring task types (1. 2. 3. order, tools, validations)
+- Any hints / complaints about what slows things down or what should be defaulted / skipped next time
+
+Discard without mercy:
+- Filler, chit-chat, redundant confirmations
+- Verbose logs, intermediate tool outputs (only final result matters)
+- Anything already finished or overruled
+
+Output rules:
+- Only plain text bullet points
+- Use sub-bullets or numbering for steps/sequences
+- Put reusable templates and SOP-like flows in front
+- Keep total concise; aim for high signal, low noise";
 
     let summarizer_user = format!(
         "Summarize the following conversation history for context preservation. Keep it short (max 12 bullet points).\n\n{}",
@@ -2094,7 +2162,7 @@ pub(crate) fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
-/// When `silent` is true, suppresses stdout (for channel use).
+/// When `silent` is true, suppresses stdout (for channel or non-CLI use).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn agent_turn(
     provider: &dyn Provider,
@@ -2107,6 +2175,8 @@ pub(crate) async fn agent_turn(
     silent: bool,
     multimodal_config: &crate::config::MultimodalConfig,
     max_tool_iterations: usize,
+    excluded_tools: &[String],
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -2122,9 +2192,9 @@ pub(crate) async fn agent_turn(
         multimodal_config,
         max_tool_iterations,
         None,
+        on_delta,
         None,
-        None,
-        &[],
+        excluded_tools,
         &[],
     )
     .await
@@ -2137,7 +2207,21 @@ async fn execute_one_tool(
     observer: &dyn Observer,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<ToolExecutionOutcome> {
-    let args_summary = truncate_with_ellipsis(&call_arguments.to_string(), 300);
+    let args_summary = {
+        let raw = call_arguments.to_string();
+        // Safely truncate to ~300 bytes without splitting UTF-8 characters.
+        const MAX_BYTES: usize = 300;
+        if raw.len() <= MAX_BYTES {
+            raw
+        } else {
+            let mut end = MAX_BYTES;
+            while !raw.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            let safe = &raw[..end];
+            format!("{safe}…")
+        }
+    };
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
         arguments: Some(args_summary),
@@ -2396,7 +2480,7 @@ pub(crate) async fn run_tool_call_loop(
 
         // Unified path via Provider::chat so provider-specific native tool logic
         // (OpenAI/Anthropic/OpenRouter/compatible adapters) is honored.
-        let request_tools = if use_native_tools {
+        let request_tools = if !tool_specs.is_empty() {
             Some(tool_specs.as_slice())
         } else {
             None
@@ -3293,6 +3377,17 @@ pub async fn run(
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
     }
+
+    // For non-CLI callers (daemon / cron / gateway-style runs), apply the
+    // non_cli_excluded_tools allowlist so these tools are neither advertised
+    // in the system prompt nor callable at runtime.
+    if !interactive {
+        let excluded = &config.autonomy.non_cli_excluded_tools;
+        if !excluded.is_empty() {
+            tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
+        }
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -3328,6 +3423,14 @@ pub async fn run(
         None
     };
     let channel_name = if interactive { "cli" } else { "daemon" };
+
+    // Determine which tools to exclude during the tool loop. CLI runs ignore
+    // non_cli_excluded_tools; daemon/cron runs honor the configured list.
+    let excluded_tools: Vec<String> = if interactive {
+        Vec::new()
+    } else {
+        config.autonomy.non_cli_excluded_tools.clone()
+    };
 
     // ── Execute ──────────────────────────────────────────────────
     let start = Instant::now();
@@ -3592,7 +3695,30 @@ pub async fn run(
 
 /// Process a single message through the full agent (with tools, peripherals, memory).
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
-pub async fn process_message(config: Config, message: &str) -> Result<String> {
+/// `extra_tools` can be used by callers (for example, the HTTP gateway) to inject
+/// additional tools such as the `nodes` tool backed by a shared registry.
+/// When `session_id` is set, history is loaded from and saved to
+/// workspace/sessions/{session_id}/history_conversation.json for conversation continuity.
+pub async fn process_message(
+    config: Config,
+    message: &str,
+    extra_tools: Option<Vec<Box<dyn Tool>>>,
+    session_id: Option<&str>,
+) -> Result<String> {
+    process_message_with_stream(config, message, extra_tools, None, session_id).await
+}
+
+/// 与 `process_message` 相同，但允许将 agent 的终局回答通过 `on_delta` 渠道
+/// 流式输出（复用工具循环中的 streaming sender 机制）。
+/// When `session_id` is set, history is loaded from and saved to
+/// workspace/sessions/{session_id}/history_conversation.json for conversation continuity.
+pub async fn process_message_with_stream(
+    config: Config,
+    message: &str,
+    extra_tools: Option<Vec<Box<dyn Tool>>>,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
+    session_id: Option<&str>,
+) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
@@ -3636,45 +3762,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
 
-    // ── Wire MCP tools (non-fatal) — process_message path ────────
-    // NOTE: Same ordering contract as the CLI path above — MCP tools must be
-    // injected after filter_primary_agent_tools_or_fail (or equivalent built-in
-    // tool allow/deny filtering) to avoid MCP tools being silently dropped.
-    if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                let names = registry.tool_names();
-                let mut registered = 0usize;
-                for name in names {
-                    if let Some(def) = registry.get_tool_def(&name).await {
-                        let wrapper: std::sync::Arc<dyn Tool> =
-                            std::sync::Arc::new(crate::tools::McpToolWrapper::new(
-                                name,
-                                def,
-                                std::sync::Arc::clone(&registry),
-                            ));
-                        if let Some(ref handle) = delegate_handle_pm {
-                            handle.write().push(std::sync::Arc::clone(&wrapper));
-                        }
-                        tools_registry.push(Box::new(crate::tools::ArcToolRef(wrapper)));
-                        registered += 1;
-                    }
-                }
-                tracing::info!(
-                    "MCP: {} tool(s) registered from {} server(s)",
-                    registered,
-                    registry.server_count()
-                );
-            }
-            Err(e) => {
-                tracing::error!("MCP registry failed to initialize: {e:#}");
-            }
-        }
+    if let Some(mut extra) = extra_tools {
+        tools_registry.append(&mut extra);
     }
 
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
@@ -3718,52 +3807,17 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .collect();
 
     let skills = crate::skills::load_skills_with_config(&config.workspace_dir, &config);
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        ("shell", "Execute terminal commands."),
-        ("file_read", "Read file contents."),
-        ("file_write", "Write file contents."),
-        ("memory_store", "Save to memory."),
-        ("memory_recall", "Search memory."),
-        ("memory_forget", "Delete a memory entry."),
-        (
-            "model_routing_config",
-            "Configure default model, scenario routing, and delegate agents.",
-        ),
-        ("screenshot", "Capture a screenshot."),
-        ("image_info", "Read image metadata."),
-    ];
-    if config.browser.enabled {
-        tool_descs.push(("browser_open", "Open approved URLs in browser."));
-    }
-    if config.composio.enabled {
-        tool_descs.push(("composio", "Execute actions on 1000+ apps via Composio."));
-    }
-    if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-        tool_descs.push(("gpio_read", "Read GPIO pin value on connected hardware."));
-        tool_descs.push((
-            "gpio_write",
-            "Set GPIO pin high or low on connected hardware.",
-        ));
-        tool_descs.push((
-            "arduino_upload",
-            "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; ZeroClaw uploads it.",
-        ));
-        tool_descs.push((
-            "hardware_memory_map",
-            "Return flash and RAM address ranges. Use when user asks for memory addresses or memory map.",
-        ));
-        tool_descs.push((
-            "hardware_board_info",
-            "Return full board info (chip, architecture, memory map). Use when user asks for board info, what board, connected hardware, or chip info.",
-        ));
-        tool_descs.push((
-            "hardware_memory_read",
-            "Read actual memory/register values from Nucleo. Use when user asks to read registers, read memory, dump lower memory 0-126, or give address and value.",
-        ));
-        tool_descs.push((
-            "hardware_capabilities",
-            "Query connected hardware for reported GPIO pins and LED pin. Use when user asks what pins are available.",
-        ));
+
+    // Dynamically extract tool descriptions from the tools_registry
+    let mut tool_descs: Vec<(&str, &str)> = tools_registry
+        .iter()
+        .map(|tool| (tool.name(), tool.description()))
+        .collect();
+    
+    // Apply non-CLI tool exclusions so `/response` 和通道场景不会暴露这些工具
+    let excluded = &config.autonomy.non_cli_excluded_tools;
+    if !excluded.is_empty() {
+        tool_descs.retain(|(name, _)| !excluded.iter().any(|ex| ex == name));
     }
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
@@ -3799,12 +3853,27 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         format!("{context}[{now}] {message}")
     };
 
-    let mut history = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user(&enriched),
-    ];
+    let mut history = if let Some(sid) = session_id.filter(|s| is_safe_session_id(s)) {
+        let prior = load_session_history(
+            &config.workspace_dir,
+            sid,
+            config.agent.max_history_messages,
+        );
+        let mut h: Vec<ChatMessage> = prior
+            .into_iter()
+            .skip_while(|m| m.role == "system")
+            .collect();
+        h.insert(0, ChatMessage::system(&system_prompt));
+        h.push(ChatMessage::user(&enriched));
+        h
+    } else {
+        vec![
+            ChatMessage::system(&system_prompt),
+            ChatMessage::user(&enriched),
+        ]
+    };
 
-    agent_turn(
+    let result = agent_turn(
         provider.as_ref(),
         &mut history,
         &tools_registry,
@@ -3815,8 +3884,36 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         true,
         &config.multimodal,
         config.agent.max_tool_iterations,
+        &config.autonomy.non_cli_excluded_tools,
+        on_delta,
+    )
+    .await?;
+
+        // Auto-compaction before hard trimming to preserve long-context signal.
+    if let Ok(compacted) = auto_compact_history(
+        &mut history,
+        provider.as_ref(),
+        &model_name,
+        config.agent.max_history_messages,
     )
     .await
+    {
+        if compacted {
+            println!("🧹 Auto-compaction complete");
+        }
+    }
+
+    if let Some(sid) = session_id.filter(|s| is_safe_session_id(s)) {
+        trim_history(&mut history, config.agent.max_history_messages);
+        let to_save: Vec<ChatMessage> = history
+            .iter()
+            .filter(|m| m.role != "system")
+            .cloned()
+            .collect();
+        let _ = save_session_history(&config.workspace_dir, sid, &to_save);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -5399,10 +5496,10 @@ Tail"#;
 
         apply_compaction_summary(&mut history, 1, 3, "- user prefers concise replies");
 
-        assert_eq!(history.len(), 4);
-        assert!(history[1].content.contains("Compaction summary"));
-        assert!(history[2].content.contains("recent 1"));
-        assert!(history[3].content.contains("recent 2"));
+        assert_eq!(history.len(), 3);
+        assert!(history[0].content.contains("sys"));
+        assert!(history[1].content.contains("recent 1"));
+        assert!(history[2].content.contains("Compaction summary"));
     }
 
     #[test]

@@ -434,7 +434,7 @@ mod tests {
         });
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),
-            arguments: None,
+            arguments: r#"{"command":"echo hello"}"#.into(),
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),

@@ -33,8 +33,9 @@ impl Observer for VerboseObserver {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 eprintln!("< Receive (success={success}, duration_ms={ms})");
             }
-            ObserverEvent::ToolCallStart { tool, .. } => {
-                eprintln!("> Tool {tool}");
+            ObserverEvent::ToolCallStart { tool, arguments } => {
+                let args_display = arguments.as_deref().unwrap_or("");
+                eprintln!("> Tool {tool} args={args_display}");
             }
             ObserverEvent::ToolCall {
                 tool,
@@ -92,7 +93,7 @@ mod tests {
         });
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),
-            arguments: None,
+            arguments: r#"{"command":"pwd"}"#.into(),
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),

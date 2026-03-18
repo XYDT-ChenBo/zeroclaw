@@ -1358,6 +1358,35 @@ pub struct GatewayConfig {
     /// Maximum distinct idempotency keys retained in memory.
     #[serde(default = "default_gateway_idempotency_max_keys")]
     pub idempotency_max_keys: usize,
+
+    /// Enable node control (WebSocket nodes + nodes tool)
+    #[serde(default)]
+    pub node_control: NodeControlConfig,
+}
+
+/// Node control configuration (`[gateway.node_control]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NodeControlConfig {
+    /// Enable node control (WebSocket nodes + nodes tool)
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allowed node IDs for node control
+    #[serde(default)]
+    pub allowed_node_ids: Vec<String>,
+    /// Optional shared secret for node-control HTTP/WebSocket APIs.
+    /// When set, inbound requests must include `X-Node-Control-Token`.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+impl Default for NodeControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_node_ids: Vec::new(),
+            auth_token: None,
+        }
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -1406,6 +1435,7 @@ impl Default for GatewayConfig {
             rate_limit_max_keys: default_gateway_rate_limit_max_keys(),
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
+            node_control: NodeControlConfig::default(),
         }
     }
 }
@@ -3274,6 +3304,8 @@ pub struct ChannelsConfig {
     pub nostr: Option<NostrConfig>,
     /// ClawdTalk voice channel configuration.
     pub clawdtalk: Option<crate::channels::ClawdTalkConfig>,
+    /// iCenter BotService WebSocket channel configuration.
+    pub bot_service: Option<BotServiceConfig>,
     /// Base timeout in seconds for processing a single channel message (LLM + tools).
     /// Runtime uses this as a per-turn budget that scales with tool-loop depth
     /// (up to 4x, capped) so one slow/retried model call does not consume the
@@ -3382,6 +3414,10 @@ impl ChannelsConfig {
                 Box::new(ConfigWrapper::new(self.clawdtalk.as_ref())),
                 self.clawdtalk.is_some(),
             ),
+            (
+                Box::new(ConfigWrapper::new(self.bot_service.as_ref())),
+                self.bot_service.is_some(),
+            ),
         ]
     }
 
@@ -3425,6 +3461,7 @@ impl Default for ChannelsConfig {
             #[cfg(feature = "channel-nostr")]
             nostr: None,
             clawdtalk: None,
+            bot_service: None,
             message_timeout_secs: default_channel_message_timeout_secs(),
             ack_reactions: true,
             show_tool_calls: true,
@@ -3659,6 +3696,38 @@ impl ChannelConfig for SignalConfig {
     }
     fn desc() -> &'static str {
         "An open-source, encrypted messaging service"
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BotServiceConfig {
+    /// Base WebSocket URL for iCenter BotService (e.g. "ws://host:port/zte-icenter-igpt-coclaw/clawbot").
+    pub ws_url: String,
+    /// Optional secret key appended as ?key= when not already present in ws_url.
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Optional account identifier forwarded via X-Emp-No header during WebSocket handshake.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Optional HTTP proxy URL (e.g. "http://proxy:8080") used for WebSocket CONNECT.
+    /// If set, ws:// URLs will be tunneled via this proxy. wss:// with proxy is
+    /// currently not supported and will result in a connection error.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
+    /// Allowed chat UUIDs or "*" for all. Values are matched against inbound `chatUuid`.
+    #[serde(default)]
+    pub allowed_from: Vec<String>,
+    /// Optional reasoning-channel identifier for future routing customization.
+    #[serde(default)]
+    pub reasoning_channel_id: Option<String>,
+}
+
+impl ChannelConfig for BotServiceConfig {
+    fn name() -> &'static str {
+        "BotService"
+    }
+    fn desc() -> &'static str {
+        "iCenter BotService WebSocket channel"
     }
 }
 
@@ -3930,6 +3999,11 @@ pub struct FeishuConfig {
     /// Allowed user IDs or union IDs (empty = deny all, "*" = allow all)
     #[serde(default)]
     pub allowed_users: Vec<String>,
+    /// When true, WebSocket connections will honor standard HTTP(S)_PROXY
+    /// environment variables. When false (default), WS connects directly even
+    /// if proxies are configured for HTTP traffic.
+    #[serde(default)]
+    pub use_proxy: bool,
     /// Event receive mode: "websocket" (default) or "webhook"
     #[serde(default)]
     pub receive_mode: LarkReceiveMode,
@@ -7485,6 +7559,7 @@ channel_id = "C123"
             rate_limit_max_keys: 2048,
             idempotency_ttl_secs: 600,
             idempotency_max_keys: 4096,
+            node_control: NodeControlConfig::default(),
         };
         let toml_str = toml::to_string(&g).unwrap();
         let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();

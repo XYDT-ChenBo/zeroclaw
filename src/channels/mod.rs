@@ -16,6 +16,7 @@
 
 pub mod clawdtalk;
 pub mod cli;
+pub mod bot_service;
 pub mod dingtalk;
 pub mod discord;
 pub mod email_channel;
@@ -48,6 +49,7 @@ pub mod whatsapp_web;
 
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
+pub use bot_service::BotServiceChannel;
 pub use dingtalk::DingTalkChannel;
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
@@ -1785,6 +1787,13 @@ async fn process_channel_message(
     };
 
     let target_channel = ctx.channels_by_name.get(&msg.channel).cloned();
+    if target_channel.is_none() {
+        tracing::warn!(
+            channel = %msg.channel,
+            available = ?ctx.channels_by_name.keys().collect::<Vec<_>>(),
+            "No channel handle for reply delivery; reply will not be sent"
+        );
+    }
     if let Err(err) = maybe_apply_runtime_config_update(ctx.as_ref()).await {
         tracing::warn!("Failed to apply runtime config update: {err}");
     }
@@ -2254,19 +2263,33 @@ async fn process_channel_message(
                 started_at.elapsed().as_millis(),
                 truncate_with_ellipsis(&delivered_response, 80)
             );
-            if let Some(channel) = target_channel.as_ref() {
-                if let Some(ref draft_id) = draft_message_id {
+            match target_channel.as_ref() {
+                Some(channel) => {
+                    tracing::info!(
+                        channel = %msg.channel,
+                        channel_impl = %channel.name(),
+                        to = %msg.reply_target,
+                        "Delivering reply to channel"
+                    );
+                    if let Some(ref draft_id) = draft_message_id {
                     if let Err(e) = channel
                         .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
                         .await
                     {
                         tracing::warn!("Failed to finalize draft: {e}; sending as new message");
-                        let _ = channel
+                        let result = channel
                             .send(
                                 &SendMessage::new(&delivered_response, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
                             )
                             .await;
+                        if let Err(err) = result {
+                            tracing::warn!(
+                                channel = %msg.channel,
+                                channel_impl = %channel.name(),
+                                "Reply send failed after draft finalize failure: {err}"
+                            );
+                        }
                     }
                 } else if let Err(e) = channel
                     .send(
@@ -2276,6 +2299,13 @@ async fn process_channel_message(
                     .await
                 {
                     eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
+                }
+                }
+                None => {
+                    tracing::warn!(
+                        channel = %msg.channel,
+                        "Reply not sent: no channel handle for delivery"
+                    );
                 }
             }
         }
@@ -2618,13 +2648,17 @@ pub fn build_system_prompt_with_mode(
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
 
+    // ── 0. Introduction ──────────────────────────────────────────────
+    prompt.push_str("# ZeroClaw\n");
+    prompt.push_str("You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct. \n\n");
+
     // ── 1. Tooling ──────────────────────────────────────────────
     if !tools.is_empty() {
-        prompt.push_str("## Tools\n\n");
-        prompt.push_str("You have access to the following tools:\n\n");
-        for (name, desc) in tools {
-            let _ = writeln!(prompt, "- **{name}**: {desc}");
-        }
+        prompt.push_str("## Tools\n");
+        prompt.push_str("You must use the provided tools in the correct manner and pass all parameters precisely as specified.  If you are uncertain about the proper usage or handling of any tool, refer to the relevant skill instructions, which may contain specific guidance.\n");
+        // for (name, desc) in tools {
+        //     let _ = writeln!(prompt, "- **{name}**: {desc}");
+        // }
         prompt.push('\n');
     }
 
@@ -3223,6 +3257,20 @@ fn collect_configured_channels(
         });
     }
 
+    if let Some(ref bs) = config.channels_config.bot_service {
+        if bs.ws_url.trim().is_empty() {
+            tracing::warn!(
+                target: "bot_service",
+                "BotService channel configured but ws_url is empty; skipping"
+            );
+        } else {
+            channels.push(ConfiguredChannel {
+                display_name: "BotService",
+                channel: Arc::new(BotServiceChannel::new(bs.clone())),
+            });
+        }
+    }
+
     if let Some(ref wa) = config.channels_config.whatsapp {
         if wa.is_ambiguous_config() {
             tracing::warn!(
@@ -3632,60 +3680,11 @@ pub async fn start_channels(config: Config) -> Result<()> {
 
     let skills = crate::skills::load_skills_with_config(&workspace, &config);
 
-    // Collect tool descriptions for the prompt
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        (
-            "shell",
-            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
-        ),
-        (
-            "file_read",
-            "Read file contents. Use when: inspecting project files, configs, logs. Don't use when: a targeted search is enough.",
-        ),
-        (
-            "file_write",
-            "Write file contents. Use when: applying focused edits, scaffolding files, updating docs/code. Don't use when: side effects are unclear or file ownership is uncertain.",
-        ),
-        (
-            "memory_store",
-            "Save to memory. Use when: preserving durable preferences, decisions, key context. Don't use when: information is transient/noisy/sensitive without need.",
-        ),
-        (
-            "memory_recall",
-            "Search memory. Use when: retrieving prior decisions, user preferences, historical context. Don't use when: answer is already in current context.",
-        ),
-        (
-            "memory_forget",
-            "Delete a memory entry. Use when: memory is incorrect/stale or explicitly requested for removal. Don't use when: impact is uncertain.",
-        ),
-    ];
-
-    if config.browser.enabled {
-        tool_descs.push((
-            "browser_open",
-            "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
-        ));
-    }
-    if config.composio.enabled {
-        tool_descs.push((
-            "composio",
-            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover actions, 'list_accounts' to retrieve connected account IDs, 'execute' to run (optionally with connected_account_id), and 'connect' for OAuth.",
-        ));
-    }
-    tool_descs.push((
-        "schedule",
-        "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
-    ));
-    tool_descs.push((
-        "pushover",
-        "Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.",
-    ));
-    if !config.agents.is_empty() {
-        tool_descs.push((
-            "delegate",
-            "Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt and returns its response.",
-        ));
-    }
+    // Dynamically extract tool descriptions from the tools_registry
+    let mut tool_descs: Vec<(&str, &str)> = tools_registry
+        .iter()
+        .map(|tool| (tool.name(), tool.description()))
+        .collect();
 
     // Filter out tools excluded for non-CLI channels so the system prompt
     // does not advertise them for channel-driven runs.
@@ -3739,7 +3738,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
             .map(|configured| configured.channel)
             .collect();
 
-    #[cfg(feature = "channel-nostr")]
     if let Some(ref ns) = config.channels_config.nostr {
         channels.push(Arc::new(
             NostrChannel::new(&ns.private_key, ns.relays.clone(), &ns.allowed_pubkeys).await?,

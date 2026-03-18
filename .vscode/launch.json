@@ -1,206 +1,373 @@
 {
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
   "version": "0.2.0",
   "configurations": [
-    // ========== 基础入口类命令 ==========
     {
-      "name": "zeroclaw onboard",
+      "name": "Debug unit tests in library 'zeroclaw'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "onboard"
-      ],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "RUST_LOG": "info,zeroclaw=debug"
+      "cargo": {
+        "args": [
+          "test",
+          "--package=zeroclaw"
+        ]
       }
     },
     {
-      "name": "zeroclaw agent",
+      "name": "Debug executable 'zeroclaw'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "agent"
-      ],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "RUST_LOG": "info,zeroclaw=debug"
-      }
-    },
-    {
-      "name": "zeroclaw gateway",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=zeroclaw",
+          "--package=zeroclaw"
+        ]
+      },
       "args": [
         "gateway"
-      ],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "RUST_LOG": "info,zeroclaw=debug"
+      ]
+    },
+    {
+      "name": "Debug unit tests in executable 'zeroclaw'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--bin=zeroclaw",
+          "--package=zeroclaw"
+        ]
       }
     },
     {
-      "name": "zeroclaw daemon",
+      "name": "Debug example 'custom_channel'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "daemon"
-      ],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "RUST_LOG": "info,zeroclaw=debug"
+      "cargo": {
+        "args": [
+          "run",
+          "--example=custom_channel",
+          "--package=zeroclaw"
+        ]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in example 'custom_channel'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--example=custom_channel",
+          "--package=zeroclaw"
+        ]
       }
     },
-    // ========== 运维/诊断类命令 ==========
     {
-      "name": "zeroclaw doctor",
+      "name": "Debug example 'custom_memory'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "doctor"
-      ],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "RUST_LOG": "info,zeroclaw=debug"
+      "cargo": {
+        "args": [
+          "run",
+          "--example=custom_memory",
+          "--package=zeroclaw"
+        ]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in example 'custom_memory'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--example=custom_memory",
+          "--package=zeroclaw"
+        ]
       }
     },
     {
-      "name": "zeroclaw status",
+      "name": "Debug example 'custom_provider'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "status"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "run",
+          "--example=custom_provider",
+          "--package=zeroclaw"
+        ]
+      },
+      "args": []
     },
     {
-      "name": "zeroclaw estop",
+      "name": "Debug unit tests in example 'custom_provider'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "estop"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    // ========== 调度 / 模型 / Provider ==========
-    {
-      "name": "zeroclaw cron",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "cron"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--example=custom_provider",
+          "--package=zeroclaw"
+        ]
+      }
     },
     {
-      "name": "zeroclaw models",
+      "name": "Debug example 'custom_tool'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "models"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "run",
+          "--example=custom_tool",
+          "--package=zeroclaw"
+        ]
+      },
+      "args": []
     },
     {
-      "name": "zeroclaw providers",
+      "name": "Debug unit tests in example 'custom_tool'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "providers"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    // ========== Channel / Skills / Integrations ==========
-    {
-      "name": "zeroclaw channel",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "channel"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--example=custom_tool",
+          "--package=zeroclaw"
+        ]
+      }
     },
     {
-      "name": "zeroclaw skills",
+      "name": "Debug integration test 'agent_e2e'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "skills"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--test=agent_e2e",
+          "--package=zeroclaw"
+        ]
+      }
     },
     {
-      "name": "zeroclaw integrations",
+      "name": "Debug integration test 'agent_loop_robustness'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "integrations"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    // ========== 迁移 / 配置 / 补全 ==========
-    {
-      "name": "zeroclaw migrate",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "migrate"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--test=agent_loop_robustness",
+          "--package=zeroclaw"
+        ]
+      }
     },
     {
-      "name": "zeroclaw config",
+      "name": "Debug integration test 'channel_routing'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "config"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--test=channel_routing",
+          "--package=zeroclaw"
+        ]
+      }
     },
     {
-      "name": "zeroclaw completions",
+      "name": "Debug integration test 'config_persistence'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "completions"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    // ========== 硬件 / 外设 ==========
-    {
-      "name": "zeroclaw hardware",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "hardware"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--test=config_persistence",
+          "--package=zeroclaw"
+        ]
+      }
     },
     {
-      "name": "zeroclaw peripheral",
+      "name": "Debug integration test 'config_schema'",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/zeroclaw",
-      "args": [
-        "peripheral"
-      ],
-      "cwd": "${workspaceFolder}"
+      "cargo": {
+        "args": [
+          "test",
+          "--test=config_schema",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'dockerignore_test'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=dockerignore_test",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'gemini_fallback_oauth_refresh'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=gemini_fallback_oauth_refresh",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'hooks_integration'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=hooks_integration",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'memory_comparison'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=memory_comparison",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'memory_restart'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=memory_restart",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'openai_codex_vision_e2e'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=openai_codex_vision_e2e",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'otel_dependency_feature_regression'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=otel_dependency_feature_regression",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'provider_resolution'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=provider_resolution",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'provider_schema'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=provider_schema",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'reply_target_field_regression'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=reply_target_field_regression",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'telegram_attachment_fallback'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=telegram_attachment_fallback",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug integration test 'whatsapp_webhook_security'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--test=whatsapp_webhook_security",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug benchmark 'agent_benchmarks'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--bench=agent_benchmarks",
+          "--package=zeroclaw"
+        ]
+      }
+    },
+    {
+      "name": "Debug unit tests in library 'zeroclaw_robot_kit'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--package=zeroclaw-robot-kit"
+        ]
+      }
     }
   ]
 }

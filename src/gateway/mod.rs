@@ -13,6 +13,7 @@ pub mod sse;
 pub mod static_files;
 pub mod ws;
 
+use super::_nodes::{ConnectedNodeRegistry, handle_ws_node, handle_http_response};
 use crate::channels::{
     Channel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
 };
@@ -48,6 +49,8 @@ use uuid::Uuid;
 pub const MAX_BODY_SIZE: usize = 65_536;
 /// Request timeout (30s) — prevents slow-loris attacks
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// `/response` timeout (120s) — allows longer non-streaming agent runs
+pub const RESPONSE_TIMEOUT_SECS: u64 = 120;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Fallback max distinct client keys tracked in gateway rate limiter.
@@ -311,6 +314,8 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Connected-node registry when node_control.enabled (WebSocket nodes + nodes tool).
+    pub node_registry: Option<Arc<ConnectedNodeRegistry>>,
     /// Shutdown signal sender for graceful shutdown
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Registry of dynamically connected nodes
@@ -402,6 +407,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         config.api_key.as_deref(),
         &config,
     );
+
     let tools_registry: Arc<Vec<ToolSpec>> =
         Arc::new(tools_registry_raw.iter().map(|t| t.spec()).collect());
 
@@ -599,11 +605,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if nextcloud_talk_channel.is_some() {
         println!("  POST /nextcloud-talk — Nextcloud Talk bot webhook");
     }
+
+    println!("  GET  /               — WebSocket for node connections");
+    println!("  POST /v1/chat/completions — OpenAI-compatible chat");
+    println!("  GET  /v1/models — list available models");
     println!("  GET  /api/*     — REST API (bearer token required)");
     println!("  GET  /ws/chat   — WebSocket agent chat");
-    if config.nodes.enabled {
-        println!("  GET  /ws/nodes  — WebSocket node discovery");
-    }
+    println!("  POST /response  — HTTP agent chat (non-streaming)");
     println!("  GET  /health    — health check");
     println!("  GET  /metrics   — Prometheus metrics");
     if let Some(code) = pairing.pairing_code() {
@@ -663,13 +671,21 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         cost_tracker,
         event_tx,
         shutdown_tx,
-        node_registry,
+        node_registry: Some(ConnectedNodeRegistry::global()),
     };
 
     // Config PUT needs larger body limit (1MB)
     let config_put_router = Router::new()
         .route("/api/config", put(api::handle_api_config_put))
         .layer(RequestBodyLimitLayer::new(1_048_576));
+
+    // `/response` uses a dedicated, longer timeout.
+    let response_router = Router::new()
+    .route("/response", post(handle_http_response))
+    .layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        Duration::from_secs(RESPONSE_TIMEOUT_SECS),
+    ));
 
     // Build router with middleware
     let app = Router::new()
@@ -713,16 +729,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/health", get(api::handle_api_health))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
-        // ── WebSocket agent chat ──
+        // ── WebSocket chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
-        // ── WebSocket node discovery ──
-        .route("/ws/nodes", get(nodes::handle_ws_nodes))
+        // ── WebSocket node connections (when node_control.enabled) ──
+        .route("/", get(handle_ws_node))
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
         .merge(config_put_router)
-        .with_state(state)
+        .merge(response_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
+        .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
@@ -910,7 +927,25 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
 /// Full-featured chat with tools for channel handlers (WhatsApp, Linq, Nextcloud Talk).
 async fn run_gateway_chat_with_tools(state: &AppState, message: &str) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    crate::agent::process_message(config, message).await
+    let mut extra_tools: Vec<Box<dyn crate::tools::Tool>> = Vec::new();
+
+    if config.gateway.node_control.enabled {
+        if let Some(registry) = state.node_registry.as_ref() {
+            extra_tools.push(Box::new(crate::tools::NodesTool::new(
+                std::sync::Arc::clone(registry)
+                    as std::sync::Arc<dyn crate::tools::NodeRegistry>,
+                &config.workspace_dir,
+            )));
+        }
+    }
+
+    crate::agent::process_message(
+        config,
+        message,
+        if extra_tools.is_empty() { None } else { Some(extra_tools) },
+        None,
+    )
+    .await
 }
 
 /// Webhook request body
@@ -1699,6 +1734,11 @@ mod tests {
     }
 
     #[test]
+    fn response_timeout_is_120_seconds() {
+        assert_eq!(RESPONSE_TIMEOUT_SECS, 120);
+    }
+
+    #[test]
     fn webhook_body_requires_message_field() {
         let valid = r#"{"message": "hello"}"#;
         let parsed: Result<WebhookBody, _> = serde_json::from_str(valid);
@@ -1752,7 +1792,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -1804,7 +1844,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2180,7 +2220,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2246,7 +2286,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let headers = HeaderMap::new();
@@ -2324,7 +2364,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let response = handle_webhook(
@@ -2374,7 +2414,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2429,7 +2469,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2489,7 +2529,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -2545,7 +2585,7 @@ mod tests {
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
