@@ -13,6 +13,7 @@ pub mod api_pairing;
 pub mod api_plugins;
 pub mod canvas;
 pub mod nodes;
+pub mod a2a;
 pub mod sse;
 pub mod static_files;
 pub mod ws;
@@ -310,6 +311,13 @@ fn normalize_max_keys(configured: usize, fallback: usize) -> usize {
         fallback.max(1)
     } else {
         configured
+    }
+}
+
+fn normalize_advertised_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
     }
 }
 
@@ -853,6 +861,12 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         Duration::from_secs(gateway_request_timeout_secs()),
     ));
 
+    let a2a_router = if config.gateway.a2a.enabled {
+        a2a::router()
+    } else {
+        Router::new()
+    };
+
     // Build router with middleware
     let inner = Router::new()
         // ── Admin routes (for CLI management) ──
@@ -951,6 +965,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .merge(config_put_router)
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback))
+        .merge(a2a_router)
         .merge(response_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .with_state(state)

@@ -117,3 +117,8 @@ allow_override = false
 # Also transcribe non-PTT (forwarded / regular) audio on WhatsApp.
 # Default: false (only voice notes are transcribed).
 # transcribe_non_ptt_audio = false
+
+[gateway.a2a]
+enabled = false
+stream_enabled = true
+auth_enabled = false
