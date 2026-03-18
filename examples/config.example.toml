@@ -81,3 +81,9 @@ schedule = { kind = "every", every_ms = 300000 }
 # mode = "announce"
 # channel = "telegram"
 # to = "123456789"
+
+
+[gateway.a2a]
+enabled = false
+stream_enabled = true
+auth_enabled = false

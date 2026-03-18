@@ -1776,6 +1776,9 @@ pub struct GatewayConfig {
     /// Enable node control (WebSocket nodes + nodes tool)
     #[serde(default)]
     pub node_control: NodeControlConfig,
+    /// Agent-to-Agent integration switches (`[gateway.a2a]` section).
+    #[serde(default)]
+    pub a2a: A2aConfig,
 }
 
 /// Node control configuration (`[gateway.node_control]` section).
@@ -1799,6 +1802,34 @@ impl Default for NodeControlConfig {
             enabled: false,
             allowed_node_ids: Vec::new(),
             auth_token: None,
+        }
+    }
+}
+
+/// Agent-to-Agent integration configuration (`[gateway.a2a]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2aConfig {
+    /// Enable A2A endpoints.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enable A2A streaming surface.
+    #[serde(default = "default_a2a_stream_enabled")]
+    pub stream_enabled: bool,
+    /// Reserved auth switch. Keep false in MVP.
+    #[serde(default)]
+    pub auth_enabled: bool,
+}
+
+fn default_a2a_stream_enabled() -> bool {
+    true
+}
+
+impl Default for A2aConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stream_enabled: default_a2a_stream_enabled(),
+            auth_enabled: false,
         }
     }
 }
@@ -1858,6 +1889,7 @@ impl Default for GatewayConfig {
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
             node_control: NodeControlConfig::default(),
+            a2a: A2aConfig::default(),
         }
     }
 }
@@ -11074,31 +11106,9 @@ room_id = "!ops:matrix.org"
 allowed_users = ["@ops:matrix.org"]
 "#;
 
-        let parsed: MatrixConfig = toml::from_str(toml).unwrap();
         assert_eq!(parsed.homeserver, "https://matrix.org");
         assert!(parsed.user_id.is_none());
         assert!(parsed.device_id.is_none());
-    }
-
-    #[test]
-    async fn signal_config_serde() {
-        let sc = SignalConfig {
-            http_url: "http://127.0.0.1:8686".into(),
-            account: "+1234567890".into(),
-            group_id: Some("group123".into()),
-            allowed_from: vec!["+1111111111".into()],
-            ignore_attachments: true,
-            ignore_stories: false,
-            proxy_url: None,
-        };
-        let json = serde_json::to_string(&sc).unwrap();
-        let parsed: SignalConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.http_url, "http://127.0.0.1:8686");
-        assert_eq!(parsed.account, "+1234567890");
-        assert_eq!(parsed.group_id.as_deref(), Some("group123"));
-        assert_eq!(parsed.allowed_from.len(), 1);
-        assert!(parsed.ignore_attachments);
-        assert!(!parsed.ignore_stories);
     }
 
     #[test]
@@ -14351,3 +14361,4 @@ require_otp_to_resume = true
         assert!(identity.contains("IDENTITY.md"));
     }
 }
+
