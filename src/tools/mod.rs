@@ -17,6 +17,7 @@
 
 pub mod ask_user;
 pub mod backup_tool;
+pub mod a2a_client;
 pub mod browser;
 pub mod browser_delegate;
 pub mod browser_open;
@@ -117,6 +118,7 @@ pub mod wrappers;
 
 pub use ask_user::AskUserTool;
 pub use backup_tool::BackupTool;
+pub use a2a_client::A2aClientTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 #[allow(unused_imports)]
 pub use browser_delegate::{BrowserDelegateConfig, BrowserDelegateTool};
@@ -423,6 +425,7 @@ pub fn all_tools_with_runtime(
             ),
             security.clone(),
         )),
+        Arc::new(A2aClientTool::new(security.clone())),
         Arc::new(FileReadTool::new(security.clone())),
         Arc::new(FileWriteTool::new(security.clone())),
         Arc::new(FileEditTool::new(security.clone())),

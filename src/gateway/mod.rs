@@ -17,6 +17,7 @@ pub mod auth_rate_limit;
 pub mod canvas;
 pub mod nodes;
 pub mod session_queue;
+pub mod a2a;
 pub mod sse;
 pub mod static_files;
 pub mod tls;
@@ -315,6 +316,13 @@ fn normalize_max_keys(configured: usize, fallback: usize) -> usize {
         fallback.max(1)
     } else {
         configured
+    }
+}
+
+fn normalize_advertised_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
     }
 }
 
@@ -883,6 +891,12 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/config", put(api::handle_api_config_put))
         .layer(RequestBodyLimitLayer::new(1_048_576));
 
+    let a2a_router = if config.gateway.a2a.enabled {
+        a2a::router()
+    } else {
+        Router::new()
+    };
+    
     // Build router with middleware
     let inner = Router::new()
         // ── Admin routes (for CLI management) ──
@@ -1016,6 +1030,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .merge(config_put_router)
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback))
+        .merge(a2a_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
