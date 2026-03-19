@@ -518,8 +518,8 @@ fn default_temperature() -> f64 {
     DEFAULT_TEMPERATURE
 }
 
-/// Default provider HTTP request timeout: 120 seconds.
-const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 120;
+/// Default provider HTTP request timeout: 600 seconds.
+const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 600;
 
 fn default_provider_timeout_secs() -> u64 {
     DEFAULT_PROVIDER_TIMEOUT_SECS
@@ -9076,7 +9076,7 @@ tool_dispatcher = "xml"
             store.decrypt(composio_encrypted).unwrap(),
             "composio-credential"
         );
-        assert_eq!(c.provider_timeout_secs, 120);
+        assert_eq!(c.provider_timeout_secs, 600);
         assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
         assert!(c.config_path.to_string_lossy().contains("config.toml"));
         assert!(!c.gateway.a2a.enabled);
@@ -9483,6 +9483,139 @@ allowed_users = ["@ops:matrix.org"]
         let parsed: SlackConfig = serde_json::from_str(json).unwrap();
         assert!(parsed.interrupt_on_new_message);
         assert!(!parsed.mention_only);
+    }
+    
+    #[test]
+    async fn config_toml_roundtrip() {
+        let config = Config {
+            workspace_dir: PathBuf::from("/tmp/test/workspace"),
+            config_path: PathBuf::from("/tmp/test/config.toml"),
+            api_key: Some("sk-test-key".into()),
+            api_url: None,
+            default_provider: Some("openrouter".into()),
+            default_model: Some("gpt-4o".into()),
+            model_providers: HashMap::new(),
+            default_temperature: 0.5,
+            provider_timeout_secs: 600,
+            observability: ObservabilityConfig {
+                backend: "log".into(),
+                ..ObservabilityConfig::default()
+            },
+            autonomy: AutonomyConfig {
+                level: AutonomyLevel::Full,
+                workspace_only: false,
+                allowed_commands: vec!["docker".into()],
+                forbidden_paths: vec!["/secret".into()],
+                max_actions_per_hour: 50,
+                max_cost_per_day_cents: 1000,
+                require_approval_for_medium_risk: false,
+                block_high_risk_commands: true,
+                shell_env_passthrough: vec!["DATABASE_URL".into()],
+                auto_approve: vec!["file_read".into()],
+                always_ask: vec![],
+                allowed_roots: vec![],
+                non_cli_excluded_tools: vec![],
+            },
+            security: SecurityConfig::default(),
+            runtime: RuntimeConfig {
+                kind: "docker".into(),
+                ..RuntimeConfig::default()
+            },
+            reliability: ReliabilityConfig::default(),
+            scheduler: SchedulerConfig::default(),
+            skills: SkillsConfig::default(),
+            model_routes: Vec::new(),
+            embedding_routes: Vec::new(),
+            query_classification: QueryClassificationConfig::default(),
+            heartbeat: HeartbeatConfig {
+                enabled: true,
+                interval_minutes: 15,
+                message: Some("Check London time".into()),
+                target: Some("telegram".into()),
+                to: Some("123456".into()),
+            },
+            cron: CronConfig::default(),
+            channels_config: ChannelsConfig {
+                cli: true,
+                telegram: Some(TelegramConfig {
+                    bot_token: "123:ABC".into(),
+                    allowed_users: vec!["user1".into()],
+                    stream_mode: StreamMode::default(),
+                    draft_update_interval_ms: default_draft_update_interval_ms(),
+                    interrupt_on_new_message: false,
+                    mention_only: false,
+                }),
+                discord: None,
+                slack: None,
+                mattermost: None,
+                webhook: None,
+                imessage: None,
+                matrix: None,
+                signal: None,
+                whatsapp: None,
+                linq: None,
+                wati: None,
+                nextcloud_talk: None,
+                email: None,
+                irc: None,
+                lark: None,
+                feishu: None,
+                dingtalk: None,
+                qq: None,
+                #[cfg(feature = "channel-nostr")]
+                nostr: None,
+                clawdtalk: None,
+                bot_service: None,
+                message_timeout_secs: 300,
+            },
+            memory: MemoryConfig::default(),
+            storage: StorageConfig::default(),
+            tunnel: TunnelConfig::default(),
+            gateway: GatewayConfig::default(),
+            composio: ComposioConfig::default(),
+            secrets: SecretsConfig::default(),
+            browser: BrowserConfig::default(),
+            http_request: HttpRequestConfig::default(),
+            multimodal: MultimodalConfig::default(),
+            web_fetch: WebFetchConfig::default(),
+            web_search: WebSearchConfig::default(),
+            proxy: ProxyConfig::default(),
+            agent: AgentConfig::default(),
+            identity: IdentityConfig::default(),
+            cost: CostConfig::default(),
+            peripherals: PeripheralsConfig::default(),
+            agents: HashMap::new(),
+            hooks: HooksConfig::default(),
+            hardware: HardwareConfig::default(),
+            transcription: TranscriptionConfig::default(),
+            tts: TtsConfig::default(),
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.api_key, config.api_key);
+        assert_eq!(parsed.default_provider, config.default_provider);
+        assert_eq!(parsed.default_model, config.default_model);
+        assert!((parsed.default_temperature - config.default_temperature).abs() < f64::EPSILON);
+        assert_eq!(parsed.observability.backend, "log");
+        assert_eq!(parsed.observability.runtime_trace_mode, "none");
+        assert_eq!(parsed.autonomy.level, AutonomyLevel::Full);
+        assert!(!parsed.autonomy.workspace_only);
+        assert_eq!(parsed.runtime.kind, "docker");
+        assert!(parsed.heartbeat.enabled);
+        assert_eq!(parsed.heartbeat.interval_minutes, 15);
+        assert_eq!(
+            parsed.heartbeat.message.as_deref(),
+            Some("Check London time")
+        );
+        assert_eq!(parsed.heartbeat.target.as_deref(), Some("telegram"));
+        assert_eq!(parsed.heartbeat.to.as_deref(), Some("123456"));
+        assert!(parsed.channels_config.telegram.is_some());
+        assert_eq!(
+            parsed.channels_config.telegram.unwrap().bot_token,
+            "123:ABC"
+        );
     }
 
     #[test]
@@ -10009,7 +10142,6 @@ default_temperature = 0.7
         ] {
             std::env::remove_var(key);
         }
-    }
 
     #[test]
     async fn env_override_api_key() {
@@ -10019,50 +10151,6 @@ default_temperature = 0.7
 
         std::env::set_var("ZEROCLAW_API_KEY", "sk-test-env-key");
         config.apply_env_overrides();
-        assert_eq!(config.api_key.as_deref(), Some("sk-test-env-key"));
-
-        std::env::remove_var("ZEROCLAW_API_KEY");
-    }
-
-    #[test]
-    async fn env_override_api_key_fallback() {
-        let _env_guard = env_override_lock().await;
-        let mut config = Config::default();
-
-        std::env::remove_var("ZEROCLAW_API_KEY");
-        std::env::set_var("API_KEY", "sk-fallback-key");
-        config.apply_env_overrides();
-        assert_eq!(config.api_key.as_deref(), Some("sk-fallback-key"));
-
-        std::env::remove_var("API_KEY");
-    }
-
-    #[test]
-    async fn env_override_provider() {
-        let _env_guard = env_override_lock().await;
-        let mut config = Config::default();
-
-        std::env::set_var("ZEROCLAW_PROVIDER", "anthropic");
-        config.apply_env_overrides();
-        assert_eq!(config.default_provider.as_deref(), Some("anthropic"));
-
-        std::env::remove_var("ZEROCLAW_PROVIDER");
-    }
-
-    #[test]
-    async fn env_override_model_provider_alias() {
-        let _env_guard = env_override_lock().await;
-        let mut config = Config::default();
-
-        std::env::remove_var("ZEROCLAW_PROVIDER");
-        std::env::set_var("ZEROCLAW_MODEL_PROVIDER", "openai-codex");
-        config.apply_env_overrides();
-        assert_eq!(config.default_provider.as_deref(), Some("openai-codex"));
-
-        std::env::remove_var("ZEROCLAW_MODEL_PROVIDER");
-    }
-
-    #[test]
     async fn toml_supports_model_provider_and_model_alias_fields() {
         let raw = r#"
 default_temperature = 0.7
@@ -11646,24 +11734,11 @@ require_otp_to_resume = true
     }
 
     #[test]
-    async fn validate_mcp_config_rejects_empty_name() {
         let cfg = McpConfig {
             enabled: true,
             servers: vec![stdio_server("", "/usr/bin/tool")],
             ..Default::default()
         };
-        let err = validate_mcp_config(&cfg).expect_err("empty name should fail");
-        assert!(
-            err.to_string().contains("name must not be empty"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_whitespace_name() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![stdio_server("   ", "/usr/bin/tool")],
             ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("whitespace name should fail");

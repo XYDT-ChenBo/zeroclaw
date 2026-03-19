@@ -124,7 +124,6 @@ pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
 pub use microsoft365::Microsoft365Tool;
 pub use model_routing_config::ModelRoutingConfigTool;
-pub use crate::dt_nodes_registry::node_registry::NodeRegistry;
 pub use dt_nodes_tool::NodesTool;
 pub use model_switch::ModelSwitchTool;
 #[allow(unused_imports)]

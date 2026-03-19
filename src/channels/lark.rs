@@ -2293,6 +2293,7 @@ mod tests {
             encrypt_key: None,
             verification_token: Some("vtoken789".into()),
             allowed_users: vec!["*".into()],
+            use_proxy: false,
             receive_mode: LarkReceiveMode::Webhook,
             port: Some(9898),
         };
@@ -2465,6 +2466,7 @@ mod tests {
             encrypt_key: None,
             verification_token: Some("vtoken789".into()),
             allowed_users: vec!["*".into()],
+            use_proxy: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Webhook,
             port: Some(9898),
         };

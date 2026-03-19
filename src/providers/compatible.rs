@@ -37,7 +37,7 @@ pub struct OpenAiCompatibleProvider {
     /// Whether this provider supports OpenAI-style native tool calling.
     /// When false, tools are injected into the system prompt as text.
     native_tool_calling: bool,
-    /// HTTP request timeout in seconds for LLM API calls. Default: 120.
+    /// HTTP request timeout in seconds for LLM API calls. Default: 600.
     timeout_secs: u64,
     /// Extra HTTP headers to include in all API requests.
     extra_headers: std::collections::HashMap<String, String>,
@@ -179,7 +179,7 @@ impl OpenAiCompatibleProvider {
             user_agent: user_agent.map(ToString::to_string),
             merge_system_into_user,
             native_tool_calling: !merge_system_into_user,
-            timeout_secs: 120,
+            timeout_secs: 600,
             extra_headers: std::collections::HashMap::new(),
             reasoning_effort: None,
             api_path: None,
@@ -501,7 +501,8 @@ impl ResponseMessage {
 
     fn effective_content_optional(&self) -> Option<String> {
         if let Some(content) = self.content.as_ref().filter(|c| !c.is_empty()) {
-            let stripped = strip_think_tags(content);
+            // let stripped = strip_think_tags(content);
+            let stripped = content.clone();
             if !stripped.is_empty() {
                 return Some(stripped);
             }
@@ -3087,9 +3088,9 @@ mod tests {
     }
 
     #[test]
-    fn default_timeout_is_120s() {
+    fn default_timeout_is_600s() {
         let p = make_provider("test", "https://example.com", None);
-        assert_eq!(p.timeout_secs, 120);
+        assert_eq!(p.timeout_secs, 600);
     }
 
     #[test]
