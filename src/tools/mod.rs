@@ -14,9 +14,9 @@
 //!
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
-
 pub mod browser;
 pub mod browser_open;
+pub mod channel_send;
 pub mod cli_discovery;
 pub mod composio;
 pub mod content_search;
@@ -27,7 +27,6 @@ pub mod cron_run;
 pub mod cron_runs;
 pub mod cron_update;
 pub mod delegate;
-pub mod channel_send;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -54,11 +53,13 @@ pub mod schema;
 pub mod screenshot;
 pub mod shell;
 pub mod traits;
+pub mod weather;
 pub mod web_fetch;
 pub mod web_search_tool;
 
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
+pub use channel_send::ChannelSendTool;
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
 pub use cron_add::CronAddTool;
@@ -89,7 +90,6 @@ pub use nodes::{NodeCommandResult, NodeDescription, NodeInfo, NodeRegistry, Node
 pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
-pub use channel_send::ChannelSendTool;
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
@@ -98,14 +98,15 @@ pub use shell::ShellTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
+pub use weather::WeatherTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 
+use crate::_nodes::ConnectedNodeRegistry;
 use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::SecurityPolicy;
-use crate::_nodes::ConnectedNodeRegistry;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -244,10 +245,7 @@ pub fn all_tools_with_runtime(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
-        Arc::new(ChannelSendTool::new(
-            config.clone(),
-            security.clone(),
-        )),
+        Arc::new(ChannelSendTool::new(config.clone(), security.clone())),
     ];
 
     if config.gateway.node_control.enabled {
@@ -284,13 +282,16 @@ pub fn all_tools_with_runtime(
         )));
     }
 
+    let mut http_tool: Option<Arc<HttpRequestTool>> = None;
     if http_config.enabled {
-        tool_arcs.push(Arc::new(HttpRequestTool::new(
+        let http = Arc::new(HttpRequestTool::new(
             security.clone(),
             http_config.allowed_domains.clone(),
             http_config.max_response_size,
             http_config.timeout_secs,
-        )));
+        ));
+        http_tool = Some(http.clone());
+        tool_arcs.push(http);
     }
 
     if web_fetch_config.enabled {
@@ -313,6 +314,19 @@ pub fn all_tools_with_runtime(
             root_config.config_path.clone(),
             root_config.secrets.encrypt,
         )));
+    }
+
+    if root_config.weather.enabled && !root_config.weather.endpoints.is_empty() {
+        if let Some(http) = &http_tool {
+            tool_arcs.push(Arc::new(WeatherTool::new(
+                root_config.weather.clone(),
+                http.clone(),
+            )));
+        } else {
+            tracing::warn!(
+                "weather tool is enabled but [http_request] is disabled; skipping weather tool registration"
+            );
+        }
     }
 
     // PDF extraction (feature-gated at compile time via rag-pdf)
