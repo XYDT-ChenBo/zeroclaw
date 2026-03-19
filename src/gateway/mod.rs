@@ -12,7 +12,7 @@ pub mod sse;
 pub mod static_files;
 pub mod ws;
 
-use super::_nodes::{ConnectedNodeRegistry, handle_ws_node, handle_http_response};
+use crate::dt_nodes_registry::{ConnectedNodeRegistry, handle_ws_node, handle_http_response};
 use crate::channels::{
     Channel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
 };

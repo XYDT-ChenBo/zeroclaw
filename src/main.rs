@@ -58,7 +58,6 @@ mod cron;
 mod daemon;
 mod doctor;
 mod gateway;
-mod _nodes;
 mod hardware;
 mod health;
 mod heartbeat;
@@ -80,7 +79,8 @@ mod skills;
 mod tools;
 mod tunnel;
 mod util;
-mod nodes;
+mod dt_nodes;
+mod dt_nodes_registry;
 
 use config::Config;
 
@@ -1206,7 +1206,7 @@ async fn main() -> Result<()> {
             name,
             token,
         } => {
-            nodes::run_node(&config, init, node_config_path, host, port, name, token).await
+            dt_nodes::run_node(&config, init, node_config_path, host, port, name, token).await
         }
     }
 }

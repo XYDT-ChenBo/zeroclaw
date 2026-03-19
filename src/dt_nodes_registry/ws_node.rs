@@ -12,7 +12,7 @@
 
 use super::node_registry::OutgoingMessage;
 use crate::gateway::AppState;
-use crate::tools::NodeCommandResult;
+use crate::dt_nodes_registry::NodeCommandResult;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
