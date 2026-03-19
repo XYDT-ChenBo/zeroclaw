@@ -21,6 +21,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use crate::dt_nodes_registry::ConnectedNodeRegistry;
 use serde_json::Value;
 use std::net::SocketAddr;
 use tokio::time::{self, Duration, MissedTickBehavior};
@@ -63,18 +64,7 @@ pub async fn handle_ws_node(
         "node websocket upgrade request received"
     );
 
-    let registry = state.node_registry.clone();
-    let Some(registry) = registry else {
-        tracing::warn!(
-            peer = %peer_addr,
-            "node websocket rejected: node_control is disabled"
-        );
-        return (
-            StatusCode::NOT_FOUND,
-            "Node WebSocket is disabled (node_control.enabled = false)",
-        )
-            .into_response();
-    };
+    let registry = ConnectedNodeRegistry::global();
 
     // Optional token check: header X-Node-Control-Token
     let config = state.config.lock().gateway.node_control.clone();

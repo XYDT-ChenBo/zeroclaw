@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use crate::dt_nodes_registry::node_registry::NodeInfo;
 use crate::dt_nodes_registry::node_registry::NodeRegistry;
+use crate::dt_nodes_registry::ConnectedNodeRegistry;
+
 /// Tool that exposes node list, describe, invoke, and run to the agent.
 /// Only registered when gateway runs with node_control.enabled and injects
 /// a concrete NodeRegistry.
@@ -23,9 +25,9 @@ pub struct NodesTool {
 }
 
 impl NodesTool {
-    pub fn new(registry: Arc<dyn NodeRegistry>, workspace_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
         Self {
-            registry,
+            registry: ConnectedNodeRegistry::global() as Arc<dyn NodeRegistry>,
             workspace_dir: workspace_dir.into(),
         }
     }
