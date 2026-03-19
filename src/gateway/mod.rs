@@ -22,7 +22,8 @@ pub mod sse;
 pub mod static_files;
 pub mod tls;
 pub mod ws;
-use super::_nodes::handle_ws_node;
+
+use crate::dt_nodes_registry::handle_ws_node;
 use crate::channels::{
     session_backend::SessionBackend, session_sqlite::SqliteSessionBackend, Channel,
     GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
@@ -896,7 +897,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     } else {
         Router::new()
     };
-    
+
     // Build router with middleware
     let inner = Router::new()
         // ── Admin routes (for CLI management) ──

@@ -8,62 +8,11 @@ use super::traits::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Info for one connected node (list entry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeInfo {
-    pub node_id: String,
-    pub status: String,
-    pub capabilities: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
-}
-
-/// Full description for a single node (describe).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeDescription {
-    pub node_id: String,
-    pub status: String,
-    pub capabilities: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
-}
-
-/// Result of an invoke or run command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeCommandResult {
-    pub success: bool,
-    pub output: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Trait for the connected-node registry. Implemented by the gateway when
-/// node-control is enabled; used by [`NodesTool`] and HTTP node-control API.
-#[async_trait]
-pub trait NodeRegistry: Send + Sync {
-    /// List all connected nodes (optionally filtered by allowlist elsewhere).
-    fn list(&self) -> Vec<NodeInfo>;
-
-    /// Describe one node by id; None if not connected.
-    fn describe(&self, node_id: &str) -> Option<NodeDescription>;
-
-    /// Send a structured invoke to the node; waits for response with timeout.
-    async fn invoke(
-        &self,
-        node_id: &str,
-        capability: &str,
-        arguments: Value,
-    ) -> Result<NodeCommandResult>;
-
-    /// Send a raw command (e.g. shell) to the node; waits for response with timeout.
-    async fn run(&self, node_id: &str, raw_command: &str) -> Result<NodeCommandResult>;
-}
-
+use crate::dt_nodes_registry::node_registry::NodeInfo;
+use crate::dt_nodes_registry::node_registry::NodeRegistry;
 /// Tool that exposes node list, describe, invoke, and run to the agent.
 /// Only registered when gateway runs with node_control.enabled and injects
 /// a concrete NodeRegistry.

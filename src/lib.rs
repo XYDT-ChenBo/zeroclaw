@@ -66,7 +66,7 @@ pub mod observability;
 pub(crate) mod onboard;
 pub mod peripherals;
 pub mod providers;
-pub mod _nodes;
+pub mod dt_nodes_registry;
 pub mod rag;
 pub mod routines;
 pub mod runtime;
