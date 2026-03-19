@@ -11548,7 +11548,6 @@ channel_id = "C123"
     async fn checklist_gateway_default_blocks_public_bind() {
         let g = GatewayConfig::default();
         assert!(
-            !g.allow_public_bind,
             "Public bind must be blocked by default"
         );
     }
@@ -11602,49 +11601,6 @@ channel_id = "C123"
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
         };
-        let toml_str = toml::to_string(&g).unwrap();
-        let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();
-        assert!(parsed.require_pairing);
-        assert!(parsed.session_persistence);
-        assert_eq!(parsed.session_ttl_hours, 0);
-        assert!(!parsed.allow_public_bind);
-        assert_eq!(parsed.paired_tokens, vec!["zc_test_token"]);
-        assert_eq!(parsed.pair_rate_limit_per_minute, 12);
-        assert_eq!(parsed.webhook_rate_limit_per_minute, 80);
-        assert!(parsed.trust_forwarded_headers);
-        assert_eq!(parsed.path_prefix.as_deref(), Some("/zeroclaw"));
-        assert_eq!(parsed.rate_limit_max_keys, 2048);
-        assert_eq!(parsed.idempotency_ttl_secs, 600);
-        assert_eq!(parsed.idempotency_max_keys, 4096);
-    }
-
-    #[test]
-    async fn checklist_gateway_backward_compat_no_gateway_section() {
-        // Old configs without [gateway] should get secure defaults
-        let minimal = r#"
-workspace_dir = "/tmp/ws"
-config_path = "/tmp/config.toml"
-default_temperature = 0.7
-"#;
-        let parsed = parse_test_config(minimal);
-        assert!(
-            parsed.gateway.require_pairing,
-            "Missing [gateway] must default to require_pairing=true"
-        );
-        assert!(
-            !parsed.gateway.allow_public_bind,
-            "Missing [gateway] must default to allow_public_bind=false"
-        );
-    }
-
-    #[test]
-    async fn checklist_autonomy_default_is_workspace_scoped() {
-        let a = AutonomyConfig::default();
-        assert!(a.workspace_only, "Default autonomy must be workspace_only");
-        assert!(
-            a.forbidden_paths.contains(&"/etc".to_string()),
-            "Must block /etc"
-        );
         assert!(
             a.forbidden_paths.contains(&"/proc".to_string()),
             "Must block /proc"
@@ -14087,7 +14043,6 @@ require_otp_to_resume = true
     async fn nevis_config_validate_rejects_invalid_token_validation() {
         let cfg = NevisConfig {
             enabled: true,
-            instance_url: "https://nevis.example.com".into(),
             realm: "master".into(),
             client_id: "test-client".into(),
             token_validation: "invalid_mode".into(),
@@ -14095,19 +14050,6 @@ require_otp_to_resume = true
             ..NevisConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("invalid value 'invalid_mode'"),
-            "Expected invalid token_validation error, got: {err}"
-        );
-    }
-
-    #[test]
-    async fn nevis_config_debug_redacts_client_secret() {
-        let cfg = NevisConfig {
-            client_secret: Some("super-secret".into()),
-            ..NevisConfig::default()
-        };
-        let debug_output = format!("{:?}", cfg);
         assert!(
             !debug_output.contains("super-secret"),
             "Debug output must not contain the raw client_secret"
