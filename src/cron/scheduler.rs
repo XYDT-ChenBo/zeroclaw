@@ -3,9 +3,13 @@ use crate::channels::MatrixChannel;
 #[cfg(feature = "whatsapp-web")]
 use crate::channels::WhatsAppWebChannel;
 use crate::channels::{
-    Channel, DiscordChannel, MattermostChannel, QQChannel, SendMessage, SignalChannel,
-    SlackChannel, TelegramChannel,
+    Channel,DingTalkChannel, DiscordChannel, MattermostChannel, QQChannel, SendMessage,
+    SignalChannel, SlackChannel, TelegramChannel,
 };
+#[cfg(feature = "channel-matrix")]
+use crate::channels::MatrixChannel;
+#[cfg(feature = "channel-lark")]
+use crate::channels::LarkChannel;
 use crate::config::Config;
 use crate::cron::{
     all_overdue_jobs, due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job,
@@ -455,6 +459,29 @@ pub(crate) async fn deliver_announcement(
                 mm.thread_replies.unwrap_or(true),
                 mm.mention_only.unwrap_or(false),
             );
+            channel.send(&SendMessage::new(output, target)).await?;
+        }
+        "dingtalk" => {
+            let dt = config
+                .channels_config
+                .dingtalk
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("dingtalk channel not configured"))?;
+            let channel = DingTalkChannel::new(
+                dt.client_id.clone(),
+                dt.client_secret.clone(),
+                dt.allowed_users.clone(),
+            );
+            channel.send(&SendMessage::new(output, target)).await?;
+        }
+        #[cfg(feature = "channel-lark")]
+        "feishu" => {
+            let fs = config
+                .channels_config
+                .feishu
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("feishu channel not configured"))?;
+            let channel = LarkChannel::from_feishu_config(fs);
             channel.send(&SendMessage::new(output, target)).await?;
         }
         "signal" => {
