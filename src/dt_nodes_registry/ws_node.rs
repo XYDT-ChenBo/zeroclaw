@@ -10,10 +10,11 @@
 //!     req   {type:"req",id,method:"node.invoke.result",params:{id,nodeId,ok,payload?,payloadJSON?,error?}}
 //! - Results are bridged back into [`NodeCommandResult`] for the `nodes` tool and HTTP APIs.
 
-use crate::_nodes::ConnectedNodeRegistry;
+
 use super::node_registry::OutgoingMessage;
 use crate::gateway::AppState;
-use crate::tools::NodeCommandResult;
+use crate::dt_nodes_registry::ConnectedNodeRegistry;
+use crate::dt_nodes_registry::NodeCommandResult;
 use axum::{
     extract::{
         ws::{Message, WebSocket},

@@ -17,7 +17,8 @@ pub mod a2a;
 pub mod sse;
 pub mod static_files;
 pub mod ws;
-use super::_nodes::{ConnectedNodeRegistry,handle_ws_node, handle_http_response};
+
+use crate::dt_nodes_registry::{ConnectedNodeRegistry, handle_ws_node, handle_http_response};
 use crate::channels::{
     session_backend::SessionBackend, session_sqlite::SqliteSessionBackend, Channel,
     GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
