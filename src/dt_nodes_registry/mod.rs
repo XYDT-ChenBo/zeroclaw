@@ -8,7 +8,7 @@ pub mod response;
 pub mod session_id;
 pub mod ws_node;
 
-pub use node_registry::ConnectedNodeRegistry;
+pub use node_registry::{ConnectedNodeRegistry, NodeCommandResult};
 pub use ws_node::handle_ws_node;
 pub use response::handle_http_response;
 
