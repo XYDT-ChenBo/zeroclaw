@@ -1822,6 +1822,7 @@ mod tests {
             encrypt_key: Some("feishu-encrypt-real".to_string()),
             verification_token: Some("feishu-verify-real".to_string()),
             allowed_users: vec!["*".to_string()],
+            use_proxy: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,
             proxy_url: None,

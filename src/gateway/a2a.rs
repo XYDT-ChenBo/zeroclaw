@@ -89,7 +89,6 @@ pub fn init(
                 let output = crate::agent::process_message(
                     self.config_template.clone(),
                     input.trim(),
-                    None,
                     Some(&ctx.context_id),
                 )
                 .await;
