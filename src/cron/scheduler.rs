@@ -1,9 +1,9 @@
+use crate::channels::{
+    Channel, DiscordChannel, DingTalkChannel, MattermostChannel, QQChannel, SendMessage,
+    SignalChannel, SlackChannel, TelegramChannel,
+};
 #[cfg(feature = "channel-matrix")]
 use crate::channels::MatrixChannel;
-use crate::channels::{
-    Channel, DiscordChannel, MattermostChannel, SendMessage, SignalChannel, SlackChannel,
-    TelegramChannel,
-};
 #[cfg(feature = "channel-lark")]
 use crate::channels::LarkChannel;
 use crate::config::Config;
@@ -400,6 +400,29 @@ pub(crate) async fn deliver_announcement(
                 mm.thread_replies.unwrap_or(true),
                 mm.mention_only.unwrap_or(false),
             );
+            channel.send(&SendMessage::new(output, target)).await?;
+        }
+        "dingtalk" => {
+            let dt = config
+                .channels_config
+                .dingtalk
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("dingtalk channel not configured"))?;
+            let channel = DingTalkChannel::new(
+                dt.client_id.clone(),
+                dt.client_secret.clone(),
+                dt.allowed_users.clone(),
+            );
+            channel.send(&SendMessage::new(output, target)).await?;
+        }
+        "qq" => {
+            let qq = config
+                .channels_config
+                .qq
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("qq channel not configured"))?;
+            let channel =
+                QQChannel::new(qq.app_id.clone(), qq.app_secret.clone(), qq.allowed_users.clone());
             channel.send(&SendMessage::new(output, target)).await?;
         }
         #[cfg(feature = "channel-lark")]

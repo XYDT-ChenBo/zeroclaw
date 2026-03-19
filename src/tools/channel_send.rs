@@ -25,7 +25,7 @@ impl Tool for ChannelSendTool {
     }
 
     fn description(&self) -> &str {
-        "Send a plain text message directly to a configured messaging channel (telegram/discord/slack/mattermost)."
+        "Send a plain text message directly to a configured messaging channel (telegram/discord/slack/mattermost/dingtalk/qq)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -34,7 +34,7 @@ impl Tool for ChannelSendTool {
             "properties": {
                 "channel": {
                     "type": "string",
-                    "enum": ["feishu","qq","email","telegram","discord","slack","mattermost","wechat"],
+                    "enum": ["feishu","qq","email","telegram","discord","slack","mattermost","wechat","dingtalk"],
                     "description": "Channel type to deliver to"
                 },
                 "to": {
