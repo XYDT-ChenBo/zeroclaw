@@ -12,6 +12,7 @@ pub mod api_pairing;
 #[cfg(feature = "plugins-wasm")]
 pub mod api_plugins;
 pub mod nodes;
+pub mod a2a;
 pub mod sse;
 pub mod static_files;
 pub mod ws;
@@ -299,6 +300,13 @@ fn normalize_max_keys(configured: usize, fallback: usize) -> usize {
         fallback.max(1)
     } else {
         configured
+    }
+}
+
+fn normalize_advertised_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
     }
 }
 
@@ -633,6 +641,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         }
     }
 
+    let advertised_base_url = tunnel_url.clone().unwrap_or_else(|| {
+        format!(
+            "http://{}:{actual_port}",
+            normalize_advertised_host(host)
+        )
+    });
+
+    if config.gateway.a2a.enabled {
+        a2a::init(&config, &advertised_base_url, tools_registry.as_ref())?;
+    }
+
     println!("🦀 ZeroClaw Gateway listening on http://{display_addr}");
     if let Some(ref url) = tunnel_url {
         println!("  🌐 Public URL: {url}");
@@ -655,6 +674,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     }
     println!("  POST /pair      — pair a new client (X-Pairing-Code header)");
     println!("  POST /webhook   — {{\"message\": \"your prompt\"}}");
+    if config.gateway.a2a.enabled {
+        println!("  GET  /a2a/.well-known/agent-card.json — A2A agent card");
+        println!("  POST /a2a       — A2A unified endpoint (JSON-RPC + streaming methods)");
+    }
     if whatsapp_channel.is_some() {
         println!("  GET  /whatsapp  — Meta webhook verification");
         println!("  POST /whatsapp  — WhatsApp message webhook");
@@ -761,6 +784,12 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         Duration::from_secs(RESPONSE_TIMEOUT_SECS),
     ));
 
+    let a2a_router = if config.gateway.a2a.enabled {
+        a2a::router()
+    } else {
+        Router::new()
+    };
+
     // Build router with middleware
     let app = Router::new()
         // ── Admin routes (for CLI management) ──
@@ -833,6 +862,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
         .merge(config_put_router)
+        .merge(a2a_router)
         .merge(response_router)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .with_state(state)

@@ -1,1 +1,6 @@
 # Example Config
+
+[gateway.a2a]
+enabled = false
+stream_enabled = true
+auth_enabled = false

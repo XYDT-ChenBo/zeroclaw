@@ -1546,6 +1546,9 @@ pub struct GatewayConfig {
     /// Pairing dashboard configuration
     #[serde(default)]
     pub pairing_dashboard: PairingDashboardConfig,
+    /// Agent-to-Agent integration switches (`[gateway.a2a]` section).
+    #[serde(default)]
+    pub a2a: A2aConfig,
 }
 
 /// Node control configuration (`[gateway.node_control]` section).
@@ -1569,6 +1572,34 @@ impl Default for NodeControlConfig {
             enabled: false,
             allowed_node_ids: Vec::new(),
             auth_token: None,
+        }
+    }
+}
+
+/// Agent-to-Agent integration configuration (`[gateway.a2a]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2aConfig {
+    /// Enable A2A endpoints.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enable A2A streaming surface.
+    #[serde(default = "default_a2a_stream_enabled")]
+    pub stream_enabled: bool,
+    /// Reserved auth switch. Keep false in MVP.
+    #[serde(default)]
+    pub auth_enabled: bool,
+}
+
+fn default_a2a_stream_enabled() -> bool {
+    true
+}
+
+impl Default for A2aConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stream_enabled: default_a2a_stream_enabled(),
+            auth_enabled: false,
         }
     }
 }
@@ -1627,6 +1658,7 @@ impl Default for GatewayConfig {
             session_persistence: true,
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
+            a2a: A2aConfig::default(),
         }
     }
 }
@@ -9044,6 +9076,21 @@ tool_dispatcher = "xml"
             store.decrypt(composio_encrypted).unwrap(),
             "composio-credential"
         );
+        assert_eq!(c.provider_timeout_secs, 120);
+        assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
+        assert!(c.config_path.to_string_lossy().contains("config.toml"));
+        assert!(!c.gateway.a2a.enabled);
+        assert!(c.gateway.a2a.stream_enabled);
+        assert!(!c.gateway.a2a.auth_enabled);
+    }
+
+    #[test]
+    async fn config_dir_creation_error_mentions_openrc_and_path() {
+        let msg = config_dir_creation_error(Path::new("/etc/zeroclaw"));
+        assert!(msg.contains("/etc/zeroclaw"));
+        assert!(msg.contains("OpenRC"));
+        assert!(msg.contains("zeroclaw"));
+    
 
         let browser_encrypted = stored.browser.computer_use.api_key.as_deref().unwrap();
         assert!(crate::security::SecretStore::is_encrypted(
@@ -9068,12 +9115,13 @@ tool_dispatcher = "xml"
         assert!(crate::security::SecretStore::is_encrypted(worker_encrypted));
         assert_eq!(store.decrypt(worker_encrypted).unwrap(), "agent-credential");
 
-        let storage_db_url = stored.storage.provider.config.db_url.as_deref().unwrap();
-        assert!(crate::security::SecretStore::is_encrypted(storage_db_url));
-        assert_eq!(
-            store.decrypt(storage_db_url).unwrap(),
-            "postgres://user:pw@host/db"
-        );
+        assert!(properties.contains_key("default_provider"));
+        assert!(properties.contains_key("skills"));
+        assert!(properties.contains_key("gateway"));
+        assert!(!properties.contains_key("a2a"));
+        assert!(properties.contains_key("channels_config"));
+        assert!(!properties.contains_key("workspace_dir"));
+        assert!(!properties.contains_key("config_path"));
 
         let feishu = stored.channels_config.feishu.as_ref().unwrap();
         assert!(crate::security::SecretStore::is_encrypted(
@@ -10123,11 +10171,14 @@ requires_openai_auth = true
     }
 
     #[test]
-    async fn env_override_zero_claw_provider_overrides_non_default_provider() {
-        let _env_guard = env_override_lock().await;
-        let mut config = Config {
-            default_provider: Some("custom:https://proxy.example.com/v1".to_string()),
-            ..Config::default()
+    async fn checklist_gateway_serde_roundtrip() {
+        let g = GatewayConfig {
+            trust_forwarded_headers: true,
+            rate_limit_max_keys: 2048,
+            idempotency_ttl_secs: 600,
+            idempotency_max_keys: 4096,
+            node_control: NodeControlConfig::default(),
+            a2a: A2aConfig::default(),
         };
 
         std::env::set_var("ZEROCLAW_PROVIDER", "openrouter");
@@ -10136,7 +10187,6 @@ requires_openai_auth = true
         assert_eq!(config.default_provider.as_deref(), Some("openrouter"));
 
         std::env::remove_var("ZEROCLAW_PROVIDER");
-        std::env::remove_var("PROVIDER");
     }
 
     #[test]

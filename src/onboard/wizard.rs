@@ -5518,6 +5518,112 @@ async fn scaffold_workspace(workspace_dir: &Path, ctx: &ProjectContext) -> Resul
          ## Open Loops\n\
          (Track unfinished tasks and follow-ups here)\n";
 
+    let a2a_setup_skill = "\
+configure the ZeroClaw A2A Gateway for cross-server agent communication. Use when: (1) setting up A2A between two or more instances, (2) user says 'configure A2A', 'set up A2A gateway', 'connect two gateway servers', 'agent-to-agent communication', (3) adding a new A2A peer to an existing setup. Covers: agent card discovery from `base_url`, capability extraction, security tokens, peer registration, network setup (Tailscale/LAN), mandatory `TOOLS.md` recording, and end-to-end verification.
+
+# A2A Gateway Setup
+
+Configure the ZeroClaw A2A Gateway for cross-server agent-to-agent communication using the A2A v0.3.0 protocol.
+
+## Step 1: User Input (Required)
+
+Ask the user for the peer agent `base_url` only.
+
+Example:
+- `http://100.x.x.x:42617`
+- `https://agent.example.com`
+
+Do not ask the user to provide the full `agent-card` path.
+
+## Step 2: Resolve and Fetch Agent Card (Required)
+
+Construct the discovery URL with this fixed suffix:
+- `<base_url>/.well-known/agent-card.json`
+
+Then call HTTP GET to fetch the card.
+
+Example:
+```bash
+curl -fsSL \"<base_url>/.well-known/agent-card.json\"
+```
+
+If the request fails, stop and return a clear error with the exact URL tried and suggested fixes (network/auth/reverse-proxy/path).
+
+## Step 3: Parse Agent Capability (Required)
+
+From the fetched Agent Card JSON, extract and summarize at least:
+- Agent identity (`name`, `description`, `version`)
+- Endpoint fields (`agent_url`, `agentCardUrl` if present)
+- Supported skills/tools/capabilities (whatever fields are present in the card)
+- Authentication requirements (token, headers, or security scheme)
+
+### URL field rules
+
+| Field  | Points to | Example   |
+| --- | ---| ---|
+| `agent_url`    | JSON-RPC endpoint (default)      | `http://100.x.x.x:42617/a2a`                         |
+| `agentCardUrl` | Agent Card discovery (preferred) | `http://100.x.x.x:42617/a2a/.well-known/agent-card.json` |
+
+**Do NOT confuse these two.** `agent_url` is for sending messages. `agentCardUrl` is for discovery.
+
+## Step 4: Write TOOLS.md (Mandatory, never skip)
+
+**This step is mandatory.** Always write or append an A2A section into the agent's `TOOLS.md` after capability discovery.
+
+Requirements:
+- Record the peer `base_url`
+- Record the resolved `agentCardUrl`
+- Record discovered capability summary from Agent Card
+- Record auth method/token requirements
+- Record how to call this peer through `a2a_client`
+
+Use `{workspace}/skills/a2a-setup/references/tools-md-template.md` as the base template and replace placeholders with real values from the card and user config.
+
+## Step 5: Final Verification
+
+Confirm all of the following in the final response:
+1. Agent Card URL fetched successfully
+2. Capability summary extracted
+3. `TOOLS.md` written/updated
+4. A2A peer is ready for invocation via `a2a_client`
+";
+
+    let a2a_tools_md_template = "
+# TOOLS.md A2A Section Template
+
+Append this section to the agent's `TOOLS.md` file, replacing all `<PLACEHOLDERS>` with actual values.
+
+---
+
+```markdown
+## A2A Gateway (Agent-to-Agent Communication)
+
+You have an A2A Gateway plugin running on port 18800. You can communicate with peer agents on other servers.
+
+### Peers
+
+| Peer | IP | Auth Token |
+|------|-----|------------|
+| <PEER_NAME> | <PEER_IP> | <PEER_TOKEN> |
+
+### How to send a message to a peer
+
+When the user says \"通过 A2A 让 <PEER_NAME> 做 xxx\" / \"Send to <PEER_NAME>: xxx\" / \"Ask <PEER_NAME> to ...\" or similar, use the a2a_client tool to communicate with other agent:
+
+---
+
+## Placeholder Reference
+
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `<PEER_NAME>` | Display name of the peer agent | `Server-A` |
+| `<PEER_IP>` | IP address reachable from this server | `100.76.43.74` |
+| `<PEER_TOKEN>` | The peer's inbound security token | `9489c2c7ce10...` |
+| `<WORKSPACE>` | Agent workspace absolute path | `/home/ubuntu/.openclaw/workspace` |
+
+For multiple peers, add one row per peer to the table.
+";
+
     let files: Vec<(&str, String)> = vec![
         ("IDENTITY.md", identity),
         ("AGENTS.md", agents),
@@ -5527,6 +5633,11 @@ async fn scaffold_workspace(workspace_dir: &Path, ctx: &ProjectContext) -> Resul
         ("TOOLS.md", tools.to_string()),
         ("BOOTSTRAP.md", bootstrap),
         ("MEMORY.md", memory.to_string()),
+        ("skills/a2a-setup/SKILL.md", a2a_setup_skill.to_string()),
+        (
+            "skills/a2a-setup/references/tools-md-template.md",
+            a2a_tools_md_template.to_string(),
+        ),
     ];
 
     // Create subdirectories
@@ -5543,6 +5654,9 @@ async fn scaffold_workspace(workspace_dir: &Path, ctx: &ProjectContext) -> Resul
         if path.exists() {
             skipped += 1;
         } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
             fs::write(&path, content).await?;
             created += 1;
         }
@@ -6357,6 +6471,44 @@ mod tests {
             let content = tokio::fs::read_to_string(tmp.path().join(f)).await.unwrap();
             assert!(!content.trim().is_empty(), "{f} should not be empty");
         }
+    }
+
+    #[tokio::test]
+    async fn scaffold_creates_default_a2a_setup_skill() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = ProjectContext::default();
+        scaffold_workspace(tmp.path(), &ctx).await.unwrap();
+
+        let skill_path = tmp.path().join("skills").join("a2a-setup").join("SKILL.md");
+        assert!(
+            skill_path.exists(),
+            "missing default skill file: {}",
+            skill_path.display()
+        );
+
+        let content = tokio::fs::read_to_string(skill_path).await.unwrap();
+        assert!(
+            content.contains("A2A Setup Skill"),
+            "default skill should include expected heading"
+        );
+
+        let reference_path = tmp
+            .path()
+            .join("skills")
+            .join("a2a-setup")
+            .join("references")
+            .join("tools-md-template.md");
+        assert!(
+            reference_path.exists(),
+            "missing a2a reference template file: {}",
+            reference_path.display()
+        );
+
+        let reference = tokio::fs::read_to_string(reference_path).await.unwrap();
+        assert!(
+            reference.contains("TOOLS.md Template for A2A Setup"),
+            "reference template should include expected heading"
+        );
     }
 
     // ── scaffold_workspace: AGENTS.md references on-demand memory
