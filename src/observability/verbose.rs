@@ -93,7 +93,7 @@ mod tests {
         });
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),
-            arguments: r#"{"command":"pwd"}"#.into(),
+            arguments: Some(r#"{"command":"pwd"}"#.to_string()),
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "shell".into(),

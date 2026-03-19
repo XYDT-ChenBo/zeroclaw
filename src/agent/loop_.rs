@@ -2287,9 +2287,9 @@ pub(crate) async fn run_tool_call_loop(
         // ── Progress: LLM thinking ────────────────────────────
         if let Some(ref tx) = on_delta {
             let phase = if iteration == 0 {
-                "\u{1f914} Thinking...\n".to_string()
+                "\u{1f914} 思考中...\n".to_string()
             } else {
-                format!("\u{1f914} Thinking (round {})...\n", iteration + 1)
+                format!("\u{1f914} 进行第{}次推理...\n", iteration + 1)
             };
             let _ = tx.send(phase).await;
         }
@@ -2489,8 +2489,8 @@ pub(crate) async fn run_tool_call_loop(
             if !tool_calls.is_empty() {
                 let _ = tx
                     .send(format!(
-                        "\u{1f4ac} Got {} tool call(s) ({llm_secs}s)\n",
-                        tool_calls.len()
+                        "{} 我需要先调用 {} 个工具来获取更多信息 (接收此消息耗时 {} 秒)\n",
+                        response_text, tool_calls.len(), llm_secs
                     ))
                     .await;
             }
@@ -2706,9 +2706,9 @@ pub(crate) async fn run_tool_call_loop(
             if let Some(ref tx) = on_delta {
                 let hint = truncate_tool_args_for_progress(&tool_name, &tool_args, 60);
                 let progress = if hint.is_empty() {
-                    format!("\u{23f3} {}\n", tool_name)
+                    format!("\u{23f3} 开始调用工具{}\n", tool_name)
                 } else {
-                    format!("\u{23f3} {}: {hint}\n", tool_name)
+                    format!("\u{23f3} 开始调用工具{}，参数：{hint}\n", tool_name)
                 };
                 tracing::debug!(tool = %tool_name, "Sending progress start to draft");
                 let _ = tx.send(progress).await;
@@ -2777,12 +2777,12 @@ pub(crate) async fn run_tool_call_loop(
             if let Some(ref tx) = on_delta {
                 let secs = outcome.duration.as_secs();
                 let icon = if outcome.success {
-                    "\u{2705}"
+                    "\u{2705} 成功"
                 } else {
-                    "\u{274c}"
+                    "\u{274c} 失败"
                 };
                 tracing::debug!(tool = %call.name, secs, "Sending progress complete to draft");
-                let _ = tx.send(format!("{icon} {} ({secs}s)\n", call.name)).await;
+                let _ = tx.send(format!("{icon} 调用工具{} ({secs}s)\n", call.name)).await;
             }
 
             ordered_results[*idx] = Some((call.name.clone(), call.tool_call_id.clone(), outcome));

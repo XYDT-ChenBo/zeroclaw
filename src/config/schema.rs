@@ -302,8 +302,8 @@ fn default_temperature() -> f64 {
     DEFAULT_TEMPERATURE
 }
 
-/// Default provider HTTP request timeout: 120 seconds.
-const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 120;
+/// Default provider HTTP request timeout: 600 seconds.
+const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 600;
 
 fn default_provider_timeout_secs() -> u64 {
     DEFAULT_PROVIDER_TIMEOUT_SECS
@@ -5627,7 +5627,7 @@ mod tests {
             c.skills.prompt_injection_mode,
             SkillsPromptInjectionMode::Full
         );
-        assert_eq!(c.provider_timeout_secs, 120);
+        assert_eq!(c.provider_timeout_secs, 600);
         assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
         assert!(c.config_path.to_string_lossy().contains("config.toml"));
     }
@@ -5832,7 +5832,7 @@ default_temperature = 0.7
             default_model: Some("gpt-4o".into()),
             model_providers: HashMap::new(),
             default_temperature: 0.5,
-            provider_timeout_secs: 120,
+            provider_timeout_secs: 600,
             observability: ObservabilityConfig {
                 backend: "log".into(),
                 ..ObservabilityConfig::default()
@@ -5901,6 +5901,7 @@ default_temperature = 0.7
                 #[cfg(feature = "channel-nostr")]
                 nostr: None,
                 clawdtalk: None,
+                bot_service: None,
                 message_timeout_secs: 300,
             },
             memory: MemoryConfig::default(),
@@ -5973,8 +5974,8 @@ default_temperature = 0.7
         assert_eq!(parsed.memory.archive_after_days, 7);
         assert_eq!(parsed.memory.purge_after_days, 30);
         assert_eq!(parsed.memory.conversation_retention_days, 30);
-        // provider_timeout_secs defaults to 120 when not specified
-        assert_eq!(parsed.provider_timeout_secs, 120);
+        // provider_timeout_secs defaults to 600 when not specified
+        assert_eq!(parsed.provider_timeout_secs, 600);
     }
 
     #[test]
@@ -6085,7 +6086,7 @@ tool_dispatcher = "xml"
             default_model: Some("test-model".into()),
             model_providers: HashMap::new(),
             default_temperature: 0.9,
-            provider_timeout_secs: 120,
+            provider_timeout_secs: 600,
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
             security: SecurityConfig::default(),
@@ -6480,6 +6481,7 @@ allowed_users = ["@ops:matrix.org"]
             qq: None,
             nostr: None,
             clawdtalk: None,
+            bot_service: None,
             message_timeout_secs: 300,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
@@ -6694,6 +6696,7 @@ channel_id = "C123"
             qq: None,
             nostr: None,
             clawdtalk: None,
+            bot_service: None,
             message_timeout_secs: 300,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
@@ -8172,6 +8175,7 @@ default_model = "legacy-model"
             encrypt_key: Some("encrypt_key".into()),
             verification_token: Some("verify_token".into()),
             allowed_users: vec!["user_123".into(), "user_456".into()],
+            use_proxy: false,
             receive_mode: LarkReceiveMode::Websocket,
             port: None,
         };
@@ -8192,6 +8196,7 @@ default_model = "legacy-model"
             encrypt_key: Some("encrypt_key".into()),
             verification_token: Some("verify_token".into()),
             allowed_users: vec!["*".into()],
+            use_proxy: false,
             receive_mode: LarkReceiveMode::Webhook,
             port: Some(9898),
         };

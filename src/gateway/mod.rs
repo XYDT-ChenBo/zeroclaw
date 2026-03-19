@@ -48,8 +48,8 @@ use uuid::Uuid;
 pub const MAX_BODY_SIZE: usize = 65_536;
 /// Request timeout (30s) — prevents slow-loris attacks
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
-/// `/response` timeout (120s) — allows longer non-streaming agent runs
-pub const RESPONSE_TIMEOUT_SECS: u64 = 120;
+/// `/response` timeout (600s) — allows longer non-streaming agent runs
+pub const RESPONSE_TIMEOUT_SECS: u64 = 600;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Fallback max distinct client keys tracked in gateway rate limiter.
@@ -1710,8 +1710,8 @@ mod tests {
     }
 
     #[test]
-    fn response_timeout_is_120_seconds() {
-        assert_eq!(RESPONSE_TIMEOUT_SECS, 120);
+    fn response_timeout_is_600_seconds() {
+        assert_eq!(RESPONSE_TIMEOUT_SECS, 600);
     }
 
     #[test]

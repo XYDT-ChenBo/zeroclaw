@@ -678,7 +678,7 @@ pub struct ProviderRuntimeOptions {
     pub secrets_encrypt: bool,
     pub reasoning_enabled: Option<bool>,
     /// HTTP request timeout in seconds for LLM provider API calls.
-    /// `None` uses the provider's built-in default (120s for compatible providers).
+    /// `None` uses the provider's built-in default (600s for compatible providers).
     pub provider_timeout_secs: Option<u64>,
 }
 
