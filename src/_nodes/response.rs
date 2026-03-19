@@ -43,7 +43,6 @@ struct ValidatedRequest {
     provider_label: String,
     model_label: String,
     id: String,
-    created: i64,
 }
 
 /// 执行鉴权、校验和准备工作，成功返回 ValidatedRequest，失败返回错误响应
@@ -122,7 +121,6 @@ fn validate_and_prepare(
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
 
-    let created = Utc::now().timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
     Ok(ValidatedRequest {
@@ -132,7 +130,6 @@ fn validate_and_prepare(
         provider_label,
         model_label,
         id,
-        created,
     })
 }
 
@@ -168,7 +165,7 @@ async fn respond_non_streaming(
             let body = serde_json::json!({
                 "id": req.id,
                 "object": "chat.completion",
-                "created": req.created,
+                "created": Utc::now().timestamp(),
                 "model": req.model_label,
                 "choices": [{
                     "index": 0,
@@ -234,14 +231,23 @@ async fn respond_streaming(
     });
 
     let id = req.id.clone();
-    let created = req.created;
+    let draft_clear_sentinel = crate::agent::loop_::DRAFT_CLEAR_SENTINEL;
     let stream = ReceiverStream::new(rx)
+        // Toggle thinking state when sentinel arrives, and do not surface sentinel itself.
+        .scan(true, move |is_thinking, chunk| {
+            if chunk == draft_clear_sentinel {
+                *is_thinking = false;
+                futures_util::future::ready(Some(None))
+            } else {
+                futures_util::future::ready(Some(Some((chunk, *is_thinking))))
+            }
+        })
+        .filter_map(futures_util::future::ready)
         .enumerate()
         .map({
             let id = id.clone();
-            let created = created;
             let model_label = model_label_for_stream.clone();
-            move |(idx, chunk)| {
+            move |(idx, (chunk, is_thinking))| {
                 let delta = if idx == 0 {
                     serde_json::json!({ "role": "assistant", "content": chunk })
                 } else {
@@ -250,13 +256,14 @@ async fn respond_streaming(
                 let payload = serde_json::json!({
                     "id": id,
                     "object": "chat.completion.chunk",
-                    "created": created,
+                    "created": Utc::now().timestamp(),
                     "model": model_label,
                     "choices": [{
                         "index": 0,
                         "delta": delta,
                         "finish_reason": null,
                     }],
+                    "is_thinking": is_thinking,
                 });
                 Ok::<Event, axum::Error>(Event::default().data(payload.to_string()))
             }
@@ -265,13 +272,14 @@ async fn respond_streaming(
             let payload = serde_json::json!({
                 "id": id,
                 "object": "chat.completion.chunk",
-                "created": created,
+                "created": Utc::now().timestamp(),
                 "model": model_label_for_stream,
                 "choices": [{
                     "index": 0,
                     "delta": {},
                     "finish_reason": "stop",
                 }],
+                "is_thinking": false,
             });
             Ok::<Event, axum::Error>(Event::default().data(payload.to_string()))
         }))

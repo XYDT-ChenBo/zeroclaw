@@ -526,7 +526,8 @@ impl ResponseMessage {
 
     fn effective_content_optional(&self) -> Option<String> {
         if let Some(content) = self.content.as_ref().filter(|c| !c.is_empty()) {
-            let stripped = strip_think_tags(content);
+            // let stripped = strip_think_tags(content);
+            let stripped = content.clone();
             if !stripped.is_empty() {
                 return Some(stripped);
             }
