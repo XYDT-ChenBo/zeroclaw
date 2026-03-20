@@ -20,6 +20,7 @@ pub mod a2a_client;
 pub mod browser;
 pub mod browser_delegate;
 pub mod browser_open;
+pub mod channel_send;
 pub mod cli_discovery;
 pub mod cloud_ops;
 pub mod cloud_patterns;
@@ -33,7 +34,6 @@ pub mod cron_runs;
 pub mod cron_update;
 pub mod data_management;
 pub mod delegate;
-pub mod channel_send;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -90,6 +90,7 @@ pub use browser_delegate::{BrowserDelegateConfig, BrowserDelegateTool};
 pub use browser_open::BrowserOpenTool;
 pub use cloud_ops::CloudOpsTool;
 pub use cloud_patterns::CloudPatternsTool;
+pub use channel_send::ChannelSendTool;
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
 pub use cron_add::CronAddTool;
@@ -133,7 +134,6 @@ pub use pdf_read::PdfReadTool;
 pub use project_intel::ProjectIntelTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
-pub use channel_send::ChannelSendTool;
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
@@ -321,10 +321,7 @@ pub fn all_tools_with_runtime(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
-        Arc::new(ChannelSendTool::new(
-            config.clone(),
-            security.clone(),
-        )),
+        Arc::new(ChannelSendTool::new(config.clone(), security.clone())),
     ];
 
     if config.gateway.node_control.enabled {
@@ -379,6 +376,7 @@ pub fn all_tools_with_runtime(
             http_config.max_response_size,
             http_config.timeout_secs,
             http_config.allow_private_hosts,
+            http_config.url_placeholders.clone(),
         )));
     }
 

@@ -87,7 +87,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory"
+        "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. or to send broadcasts/notifications (e.g. termux-am broadcast),Don't use when: a safer dedicated tool exists, or command is destructive without approval."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

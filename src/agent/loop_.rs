@@ -256,7 +256,6 @@ pub(crate) const PROGRESS_MIN_INTERVAL_MS: u64 = 500;
 /// Used before streaming the final answer so progress lines are replaced by the clean response.
 pub(crate) const DRAFT_CLEAR_SENTINEL: &str = "\x00CLEAR\x00";
 
-
 /// Extract a short hint from tool call arguments for progress display.
 fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len: usize) -> String {
     let hint = match name {
@@ -3415,7 +3414,7 @@ pub async fn run(
     let mut tool_descs: Vec<(&str, &str)> = vec![
         (
             "shell",
-            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
+            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. or to send broadcasts/notifications (e.g. termux-am broadcast),Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
         ),
         (
             "file_read",
