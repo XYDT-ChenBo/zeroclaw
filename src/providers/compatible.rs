@@ -15,6 +15,7 @@ use reqwest::{
     Client,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// A provider that speaks the OpenAI-compatible chat completions API.
 /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
@@ -1276,90 +1277,126 @@ impl OpenAiCompatibleProvider {
         messages: &[ChatMessage],
         allow_user_image_parts: bool,
     ) -> Vec<NativeMessage> {
-        messages
-            .iter()
-            .map(|message| {
-                if message.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
-                    {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ProviderToolCall>>(
-                                    tool_calls_value.clone(),
-                                )
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| ToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: Some(Function {
-                                            name: Some(tc.name),
-                                            arguments: Some(tc.arguments),
-                                        }),
-                                        name: None,
-                                        arguments: None,
-                                        parameters: None,
-                                    })
-                                    .collect::<Vec<_>>();
+        Self::convert_messages_for_native_guarded(messages, allow_user_image_parts).0
+    }
 
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(|value| MessageContent::Text(value.to_string()));
+    fn convert_messages_for_native_guarded(
+        messages: &[ChatMessage],
+        allow_user_image_parts: bool,
+    ) -> (Vec<NativeMessage>, usize, Vec<String>) {
+        let mut native_messages = Vec::with_capacity(messages.len());
+        let mut seen_tool_call_ids: HashSet<String> = HashSet::new();
+        let mut dropped_orphan_tool_results = 0usize;
+        let mut orphan_tool_call_id_samples = Vec::new();
 
-                                let reasoning_content = value
-                                    .get("reasoning_content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-
-                                return NativeMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                    reasoning_content,
-                                };
+        for message in messages {
+            if message.role == "assistant" {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) {
+                    if let Some(tool_calls_value) = value.get("tool_calls") {
+                        if let Ok(parsed_calls) =
+                            serde_json::from_value::<Vec<ProviderToolCall>>(
+                                tool_calls_value.clone(),
+                            )
+                        {
+                            for tc in &parsed_calls {
+                                seen_tool_call_ids.insert(tc.id.clone());
                             }
+
+                            let tool_calls = parsed_calls
+                                .into_iter()
+                                .map(|tc| ToolCall {
+                                    id: Some(tc.id),
+                                    kind: Some("function".to_string()),
+                                    function: Some(Function {
+                                        name: Some(tc.name),
+                                        arguments: Some(tc.arguments),
+                                    }),
+                                    name: None,
+                                    arguments: None,
+                                    parameters: None,
+                                })
+                                .collect::<Vec<_>>();
+
+                            let content = value
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|value| MessageContent::Text(value.to_string()));
+
+                            let reasoning_content = value
+                                .get("reasoning_content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToString::to_string);
+
+                            native_messages.push(NativeMessage {
+                                role: "assistant".to_string(),
+                                content,
+                                tool_call_id: None,
+                                tool_calls: Some(tool_calls),
+                                reasoning_content,
+                            });
+                            continue;
                         }
                     }
                 }
+            }
 
-                if message.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(|value| MessageContent::Text(value.to_string()))
-                            .or_else(|| Some(MessageContent::Text(message.content.clone())));
+            if message.role == "tool" {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let Some(tool_call_id) = tool_call_id else {
+                        dropped_orphan_tool_results += 1;
+                        if orphan_tool_call_id_samples.len() < 3 {
+                            orphan_tool_call_id_samples.push("<missing>".to_string());
+                        }
+                        continue;
+                    };
 
-                        return NativeMessage {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                            reasoning_content: None,
-                        };
+                    if !seen_tool_call_ids.contains(&tool_call_id) {
+                        dropped_orphan_tool_results += 1;
+                        if orphan_tool_call_id_samples.len() < 3 {
+                            orphan_tool_call_id_samples.push(tool_call_id.clone());
+                        }
+                        continue;
                     }
-                }
 
-                NativeMessage {
-                    role: message.role.clone(),
-                    content: Some(Self::to_message_content(
-                        &message.role,
-                        &message.content,
-                        allow_user_image_parts,
-                    )),
-                    tool_call_id: None,
-                    tool_calls: None,
-                    reasoning_content: None,
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|value| MessageContent::Text(value.to_string()))
+                        .or_else(|| Some(MessageContent::Text(message.content.clone())));
+
+                    native_messages.push(NativeMessage {
+                        role: "tool".to_string(),
+                        content,
+                        tool_call_id: Some(tool_call_id),
+                        tool_calls: None,
+                        reasoning_content: None,
+                    });
+                    continue;
                 }
-            })
-            .collect()
+            }
+
+            native_messages.push(NativeMessage {
+                role: message.role.clone(),
+                content: Some(Self::to_message_content(
+                    &message.role,
+                    &message.content,
+                    allow_user_image_parts,
+                )),
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
+            });
+        }
+
+        (
+            native_messages,
+            dropped_orphan_tool_results,
+            orphan_tool_call_id_samples,
+        )
     }
 
     fn with_prompt_guided_tool_instructions(
@@ -1838,12 +1875,24 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             request.messages.to_vec()
         };
-        let native_request = NativeChatRequest {
-            model: model.to_string(),
-            messages: Self::convert_messages_for_native(
+        let (native_messages, dropped_orphan_tool_results, orphan_tool_call_id_samples) =
+            Self::convert_messages_for_native_guarded(
                 &effective_messages,
                 !self.merge_system_into_user,
-            ),
+            );
+        if dropped_orphan_tool_results > 0 {
+            tracing::warn!(
+                provider = %self.name,
+                model = %model,
+                dropped_orphan_tool_results,
+                orphan_tool_call_id_samples = ?orphan_tool_call_id_samples,
+                "Dropped orphan tool-result messages before native provider request"
+            );
+        }
+
+        let native_request = NativeChatRequest {
+            model: model.to_string(),
+            messages: native_messages,
             temperature,
             stream: Some(false),
             reasoning_effort: self.reasoning_effort_for_model(model),
@@ -2749,11 +2798,37 @@ mod tests {
         )];
 
         let converted = OpenAiCompatibleProvider::convert_messages_for_native(&input, true);
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].role, "tool");
-        assert_eq!(converted[0].tool_call_id.as_deref(), Some("call_abc"));
+        assert_eq!(converted.len(), 0);
+    }
+
+    #[test]
+    fn convert_messages_for_native_drops_orphan_tool_result_payload() {
+        let input = vec![ChatMessage::tool(
+            r#"{"tool_call_id":"call_missing","content":"done"}"#,
+        )];
+
+        let (converted, dropped, samples) =
+            OpenAiCompatibleProvider::convert_messages_for_native_guarded(&input, true);
+        assert_eq!(converted.len(), 0);
+        assert_eq!(dropped, 1);
+        assert_eq!(samples, vec!["call_missing".to_string()]);
+    }
+
+    #[test]
+    fn convert_messages_for_native_keeps_matched_tool_result_payload() {
+        let input = vec![
+            ChatMessage::assistant(
+                r#"{"content":"Using tool","tool_calls":[{"id":"call_abc","name":"shell","arguments":"{\"command\":\"pwd\"}"}]}"#,
+            ),
+            ChatMessage::tool(r#"{"tool_call_id":"call_abc","content":"done"}"#),
+        ];
+
+        let converted = OpenAiCompatibleProvider::convert_messages_for_native(&input, true);
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[1].role, "tool");
+        assert_eq!(converted[1].tool_call_id.as_deref(), Some("call_abc"));
         assert!(matches!(
-            converted[0].content.as_ref(),
+            converted[1].content.as_ref(),
             Some(MessageContent::Text(value)) if value == "done"
         ));
     }

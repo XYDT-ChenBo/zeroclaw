@@ -558,6 +558,7 @@ pub fn all_tools_with_runtime(
             http_config.max_response_size,
             http_config.timeout_secs,
             http_config.allow_private_hosts,
+            http_config.url_placeholders.clone(),
         )));
     }
 
