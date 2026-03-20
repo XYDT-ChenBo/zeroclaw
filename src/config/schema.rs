@@ -197,10 +197,6 @@ pub struct Config {
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
-    /// Weather tool configuration (`[weather]`). Extensible endpoints (weather, air_quality).
-    #[serde(default)]
-    pub weather: WeatherConfig,
-
     /// Proxy configuration for outbound HTTP/HTTPS/SOCKS5 traffic (`[proxy]`).
     #[serde(default)]
     pub proxy: ProxyConfig,
@@ -1260,6 +1256,10 @@ pub struct HttpRequestConfig {
     /// Request timeout in seconds (default: 30)
     #[serde(default = "default_http_timeout_secs")]
     pub timeout_secs: u64,
+    /// URL placeholder replacements used by `http_request`.
+    /// Example: `{"WEATHER_API_KEY": "xxx"}` enables replacing `{{WEATHER_API_KEY}}`.
+    #[serde(default)]
+    pub url_placeholders: HashMap<String, String>,
 }
 
 impl Default for HttpRequestConfig {
@@ -1269,6 +1269,7 @@ impl Default for HttpRequestConfig {
             allowed_domains: vec![],
             max_response_size: default_http_max_response_size(),
             timeout_secs: default_http_timeout_secs(),
+            url_placeholders: HashMap::new(),
         }
     }
 }
@@ -1328,45 +1329,6 @@ impl Default for WebFetchConfig {
             blocked_domains: vec![],
             max_response_size: default_web_fetch_max_response_size(),
             timeout_secs: default_web_fetch_timeout_secs(),
-        }
-    }
-}
-
-/// Weather tool configuration (`[weather]` section).
-///
-/// Supports multiple endpoints (weather, air_quality, etc.). Region code and
-/// API key are read from config; region can be overridden per request.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WeatherConfig {
-    /// Enable the weather tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// Default region code (overridable per request)
-    #[serde(default)]
-    pub stationid: Option<String>,
-    /// API key (not logged or exposed to prompt)
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// Endpoint URLs by query_type: weather, air_quality, etc.
-    #[serde(default)]
-    pub endpoints: HashMap<String, String>,
-    /// Request timeout in seconds
-    #[serde(default = "default_weather_timeout_secs")]
-    pub timeout_secs: u64,
-}
-
-fn default_weather_timeout_secs() -> u64 {
-    15
-}
-
-impl Default for WeatherConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            stationid: None,
-            api_key: None,
-            endpoints: HashMap::new(),
-            timeout_secs: default_weather_timeout_secs(),
         }
     }
 }
@@ -4002,7 +3964,6 @@ impl Default for Config {
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
-            weather: crate::config::WeatherConfig::default(),
         }
     }
 }

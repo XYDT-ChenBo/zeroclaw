@@ -53,7 +53,6 @@ pub mod schema;
 pub mod screenshot;
 pub mod shell;
 pub mod traits;
-pub mod weather;
 pub mod web_fetch;
 pub mod web_search_tool;
 
@@ -98,7 +97,6 @@ pub use shell::ShellTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
-pub use weather::WeatherTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 
@@ -282,16 +280,14 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    let mut http_tool: Option<Arc<HttpRequestTool>> = None;
     if http_config.enabled {
-        let http = Arc::new(HttpRequestTool::new(
+        tool_arcs.push(Arc::new(HttpRequestTool::new(
             security.clone(),
             http_config.allowed_domains.clone(),
             http_config.max_response_size,
             http_config.timeout_secs,
-        ));
-        http_tool = Some(http.clone());
-        tool_arcs.push(http);
+            http_config.url_placeholders.clone(),
+        )));
     }
 
     if web_fetch_config.enabled {
@@ -314,19 +310,6 @@ pub fn all_tools_with_runtime(
             root_config.config_path.clone(),
             root_config.secrets.encrypt,
         )));
-    }
-
-    if root_config.weather.enabled && !root_config.weather.endpoints.is_empty() {
-        if let Some(http) = &http_tool {
-            tool_arcs.push(Arc::new(WeatherTool::new(
-                root_config.weather.clone(),
-                http.clone(),
-            )));
-        } else {
-            tracing::warn!(
-                "weather tool is enabled but [http_request] is disabled; skipping weather tool registration"
-            );
-        }
     }
 
     // PDF extraction (feature-gated at compile time via rag-pdf)
