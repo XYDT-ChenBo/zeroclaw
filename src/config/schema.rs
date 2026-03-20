@@ -2586,6 +2586,10 @@ pub struct HttpRequestConfig {
     /// Default: false (deny private hosts for SSRF protection).
     #[serde(default)]
     pub allow_private_hosts: bool,
+    /// URL placeholder replacements used by `http_request`.
+    /// Example: `{"WEATHER_API_KEY": "xxx"}` enables replacing `{{WEATHER_API_KEY}}`.
+    #[serde(default)]
+    pub url_placeholders: HashMap<String, String>,
 }
 
 impl Default for HttpRequestConfig {
@@ -2596,6 +2600,7 @@ impl Default for HttpRequestConfig {
             max_response_size: default_http_max_response_size(),
             timeout_secs: default_http_timeout_secs(),
             allow_private_hosts: false,
+            url_placeholders: HashMap::new(),
         }
     }
 }
