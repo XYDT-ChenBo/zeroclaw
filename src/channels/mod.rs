@@ -26,6 +26,7 @@ pub mod irc;
 #[cfg(feature = "channel-lark")]
 pub mod lark;
 pub mod linq;
+pub mod media_markers;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 pub mod mattermost;
@@ -67,6 +68,7 @@ pub use irc::IrcChannel;
 #[cfg(feature = "channel-lark")]
 pub use lark::LarkChannel;
 pub use linq::LinqChannel;
+pub use media_markers::{parse_outgoing_media_markers, OutgoingMediaKind, OutgoingMediaPart};
 #[cfg(feature = "channel-matrix")]
 pub use matrix::MatrixChannel;
 pub use mattermost::MattermostChannel;
@@ -539,6 +541,14 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
              - For media attachments use markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], or [VOICE:<path-or-url>]\n\
              - Keep normal text outside markers and never wrap markers in code fences.\n\
              - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
+        ),
+        // v1: Lark/Feishu supports outgoing media markers as local-path-only uploads.
+        "lark" | "feishu" => Some(
+            "When responding on Lark/Feishu:\n\
+             - For media attachments use markers: [IMAGE:<local-absolute-path>], [DOCUMENT:<local-absolute-path>], [VIDEO:<local-absolute-path>], [AUDIO:<local-absolute-path>], or [VOICE:<local-absolute-path>]\n\
+             - v1 only supports uploading local file paths. Remote URLs may be skipped.\n\
+             - Keep normal text outside markers and never wrap markers in code fences.\n\
+             - Be concise and direct. Skip filler phrases like 'Great question!' or 'Certainly!'\n",
         ),
         _ => None,
     }

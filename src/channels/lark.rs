@@ -1,15 +1,19 @@
+use super::media_markers::{parse_outgoing_media_markers, OutgoingMediaKind};
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as ProstMessage;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::DnsName;
+use reqwest::multipart::{Form, Part};
 use std::collections::HashMap;
 use std::env;
+use std::path::Path;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::fs;
 use tokio::sync::RwLock;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
@@ -1283,6 +1287,16 @@ impl LarkChannel {
     }
 }
 
+/// Lark/Feishu file_type for non-image uploads.
+fn lark_file_type(kind: OutgoingMediaKind) -> &'static str {
+    match kind {
+        OutgoingMediaKind::Image => "image",
+        OutgoingMediaKind::Document => "stream",
+        OutgoingMediaKind::Video => "mp4",
+        OutgoingMediaKind::Audio | OutgoingMediaKind::Voice => "opus",
+    }
+}
+
 #[async_trait]
 impl Channel for LarkChannel {
     fn name(&self) -> &str {
@@ -1290,36 +1304,303 @@ impl Channel for LarkChannel {
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let token = self.get_tenant_access_token().await?;
+        let mut token = self.get_tenant_access_token().await?;
         let url = self.send_message_url();
 
-        let content = serde_json::json!({ "text": message.content }).to_string();
-        let body = serde_json::json!({
-            "receive_id": message.recipient,
-            "msg_type": "text",
-            "content": content,
-        });
+        let (cleaned_text, parts) = parse_outgoing_media_markers(&message.content);
 
-        let (status, response) = self.send_text_once(&url, &token, &body).await?;
+        // Send text first (caption-like content) when present.
+        let mut sent_any = false;
+        if !cleaned_text.is_empty() {
+            let content = serde_json::json!({ "text": cleaned_text }).to_string();
+            let body = serde_json::json!({
+                "receive_id": message.recipient,
+                "msg_type": "text",
+                "content": content,
+            });
 
-        if should_refresh_lark_tenant_token(status, &response) {
-            // Token expired/invalid, invalidate and retry once.
-            self.invalidate_token().await;
-            let new_token = self.get_tenant_access_token().await?;
-            let (retry_status, retry_response) =
-                self.send_text_once(&url, &new_token, &body).await?;
-
-            if should_refresh_lark_tenant_token(retry_status, &retry_response) {
-                anyhow::bail!(
-                    "Lark send failed after token refresh: status={retry_status}, body={retry_response}"
-                );
+            let mut retried = false;
+            loop {
+                let (status, response) = self.send_text_once(&url, &token, &body).await?;
+                if should_refresh_lark_tenant_token(status, &response) && !retried {
+                    // Token expired/invalid, invalidate and retry once.
+                    self.invalidate_token().await;
+                    token = self.get_tenant_access_token().await?;
+                    retried = true;
+                    continue;
+                }
+                ensure_lark_send_success(status, &response, "text message")?;
+                sent_any = true;
+                break;
             }
-
-            ensure_lark_send_success(retry_status, &retry_response, "after token refresh")?;
-            return Ok(());
         }
 
-        ensure_lark_send_success(status, &response, "without token refresh")?;
+        // Upload & send local media parts (v1: local paths only).
+        for part in parts {
+            if part.target.starts_with("http://") || part.target.starts_with("https://") {
+                tracing::warn!("lark: unresolved remote media skipped (kind={:?})", part.kind);
+                continue;
+            }
+
+            let path = Path::new(&part.target);
+            if !path.exists() || !path.is_file() {
+                tracing::warn!("lark: unresolved local media skipped (kind={:?})", part.kind);
+                continue;
+            }
+
+            // Read once so retries do not re-read from disk.
+            let file_bytes = match fs::read(path).await {
+                Ok(b) => b,
+                Err(_) => {
+                    tracing::warn!("lark: media read failed (kind={:?})", part.kind);
+                    continue;
+                }
+            };
+
+            match part.kind {
+                OutgoingMediaKind::Image => {
+                    let upload_url = format!("{}/im/v1/images", self.api_base());
+
+                    let mut uploaded_image_key: Option<String> = None;
+                    let mut retried = false;
+                    loop {
+                        let file_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image.bin");
+
+                        let form = Form::new()
+                            .text("image_type", "message")
+                            .part(
+                                "image",
+                                Part::bytes(file_bytes.clone()).file_name(file_name.to_string()),
+                            );
+
+                        let resp = self
+                            .http_client()
+                            .post(&upload_url)
+                            .header("Authorization", format!("Bearer {token}"))
+                            .multipart(form)
+                            .send()
+                            .await;
+
+                        let resp = match resp {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!("lark: image upload request failed");
+                                break;
+                            }
+                        };
+
+                        let status = resp.status();
+                        let raw = resp.text().await.unwrap_or_default();
+                        let body_json = serde_json::from_str::<serde_json::Value>(&raw)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
+
+                        if should_refresh_lark_tenant_token(status, &body_json) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+
+                        if status.is_success()
+                            && body_json
+                                .get("code")
+                                .and_then(|c| c.as_i64())
+                                .unwrap_or(0)
+                                == 0
+                        {
+                            let image_key = body_json
+                                .pointer("/image_key")
+                                .or_else(|| body_json.pointer("/data/image_key"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            uploaded_image_key = image_key;
+                        }
+                        break;
+                    }
+
+                    let Some(image_key) = uploaded_image_key else {
+                        tracing::warn!("lark: image upload failed");
+                        continue;
+                    };
+
+                    // Send image message.
+                    let content = serde_json::json!({ "image_key": image_key }).to_string();
+                    let body = serde_json::json!({
+                        "receive_id": message.recipient,
+                        "msg_type": "image",
+                        "content": content,
+                    });
+
+                    let mut retried = false;
+                    loop {
+                        let (status, response) = match self.send_text_once(&url, &token, &body).await
+                        {
+                            Ok(v) => v,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "lark: image message send request failed (kind={:?})",
+                                    part.kind
+                                );
+                                break;
+                            }
+                        };
+                        if should_refresh_lark_tenant_token(status, &response) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+                        if let Err(_) =
+                            ensure_lark_send_success(status, &response, "image message")
+                        {
+                            tracing::warn!(
+                                "lark: image message send failed (kind={:?})",
+                                part.kind
+                            );
+                            break;
+                        }
+                        sent_any = true;
+                        break;
+                    }
+                }
+                _ => {
+                    let upload_url = format!("{}/im/v1/files", self.api_base());
+                    let file_type = lark_file_type(part.kind);
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attachment.bin")
+                        .to_string();
+
+                    let mut uploaded_file_key: Option<String> = None;
+                    let mut retried = false;
+                    loop {
+                        let form = Form::new()
+                            .text("file_type", file_type)
+                            .text("file_name", filename.clone())
+                            .part(
+                                "file",
+                                Part::bytes(file_bytes.clone()).file_name(filename.clone()),
+                            );
+
+                        let resp = self
+                            .http_client()
+                            .post(&upload_url)
+                            .header("Authorization", format!("Bearer {token}"))
+                            .multipart(form)
+                            .send()
+                            .await;
+
+                        let resp = match resp {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!("lark: file upload request failed (kind={:?})", part.kind);
+                                break;
+                            }
+                        };
+
+                        let status = resp.status();
+                        let raw = resp.text().await.unwrap_or_default();
+                        let body_json = serde_json::from_str::<serde_json::Value>(&raw)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
+
+                        if should_refresh_lark_tenant_token(status, &body_json) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+
+                        if status.is_success()
+                            && body_json
+                                .get("code")
+                                .and_then(|c| c.as_i64())
+                                .unwrap_or(0)
+                                == 0
+                        {
+                            let file_key = body_json
+                                .pointer("/file_key")
+                                .or_else(|| body_json.pointer("/data/file_key"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            uploaded_file_key = file_key;
+                        }
+                        break;
+                    }
+
+                    let Some(file_key) = uploaded_file_key else {
+                        tracing::warn!("lark: file upload failed (kind={:?})", part.kind);
+                        continue;
+                    };
+
+                    let content = serde_json::json!({ "file_key": file_key }).to_string();
+                    let body = serde_json::json!({
+                        "receive_id": message.recipient,
+                        "msg_type": "file",
+                        "content": content,
+                    });
+
+                    let mut retried = false;
+                    loop {
+                        let (status, response) = match self.send_text_once(&url, &token, &body).await
+                        {
+                            Ok(v) => v,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "lark: file message send request failed (kind={:?})",
+                                    part.kind
+                                );
+                                break;
+                            }
+                        };
+                        if should_refresh_lark_tenant_token(status, &response) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+                        if let Err(_) =
+                            ensure_lark_send_success(status, &response, "file message")
+                        {
+                            tracing::warn!(
+                                "lark: file message send failed (kind={:?})",
+                                part.kind
+                            );
+                            break;
+                        }
+                        sent_any = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // v1 compatibility: if everything was unresolved/failed and we didn't send
+        // any text, send a fixed placeholder to avoid empty deliveries.
+        if !sent_any {
+            let content = serde_json::json!({ "text": "[empty message]" }).to_string();
+            let body = serde_json::json!({
+                "receive_id": message.recipient,
+                "msg_type": "text",
+                "content": content,
+            });
+            let mut retried = false;
+            loop {
+                let (status, response) = self.send_text_once(&url, &token, &body).await?;
+                if should_refresh_lark_tenant_token(status, &response) && !retried {
+                    self.invalidate_token().await;
+                    token = self.get_tenant_access_token().await?;
+                    retried = true;
+                    continue;
+                }
+                ensure_lark_send_success(status, &response, "empty message")?;
+                break;
+            }
+        }
+
         Ok(())
     }
 
