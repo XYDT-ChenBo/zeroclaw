@@ -16,29 +16,53 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  RELEASE_CARGO_FEATURES: channel-matrix,channel-lark,memory-postgres
 
 jobs:
   version:
     name: Resolve Version
+    if: github.repository == 'zeroclaw-labs/zeroclaw'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
       tag: ${{ steps.ver.outputs.tag }}
+      skip: ${{ steps.ver.outputs.skip }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 2
       - name: Compute beta version
         id: ver
         shell: bash
         run: |
           set -euo pipefail
           base_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+
+          # Skip beta if this is a version bump commit (stable release handles it)
+          commit_msg=$(git log -1 --pretty=format:"%s")
+          if [[ "$commit_msg" =~ ^chore:\ bump\ version ]]; then
+            echo "Version bump commit detected — skipping beta release"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip beta if a stable tag already exists for this version
+          if git ls-remote --exit-code --tags origin "refs/tags/v${base_version}" >/dev/null 2>&1; then
+            echo "Stable tag v${base_version} exists — skipping beta release"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           beta_tag="v${base_version}-beta.${GITHUB_RUN_NUMBER}"
           echo "version=${base_version}" >> "$GITHUB_OUTPUT"
           echo "tag=${beta_tag}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "Beta release: ${beta_tag}"
 
   release-notes:
     name: Generate Release Notes
+    needs: [version]
+    if: github.repository == 'zeroclaw-labs/zeroclaw' && needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     outputs:
       notes: ${{ steps.notes.outputs.body }}
@@ -129,6 +153,8 @@ jobs:
 
   web:
     name: Build Web Dashboard
+    needs: [version]
+    if: github.repository == 'zeroclaw-labs/zeroclaw' && needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -168,6 +194,13 @@ jobs:
             cross_compiler: gcc-aarch64-linux-gnu
             linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
             linker: aarch64-linux-gnu-gcc
+          - os: ubuntu-22.04
+            target: armv7-unknown-linux-gnueabihf
+            artifact: zeroclaw
+            ext: tar.gz
+            cross_compiler: gcc-arm-linux-gnueabihf
+            linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
+            linker: arm-linux-gnueabihf-gcc
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: zeroclaw
@@ -213,7 +246,7 @@ jobs:
           if [ -n "${{ matrix.linker_env || '' }}" ] && [ -n "${{ matrix.linker || '' }}" ]; then
             export "${{ matrix.linker_env }}=${{ matrix.linker }}"
           fi
-          cargo build --release --locked --features channel-matrix --target ${{ matrix.target }}
+          cargo build --release --locked --features "${{ env.RELEASE_CARGO_FEATURES }}" --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -345,8 +378,6 @@ jobs:
         with:
           context: docker-ctx
           push: true
-          build-args: |
-            ZEROCLAW_CARGO_FEATURES=channel-matrix
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:beta

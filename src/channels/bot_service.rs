@@ -509,6 +509,7 @@ impl BotServiceChannel {
             channel: "bot_service".to_string(),
             timestamp,
             thread_ts: None,
+            interruption_scope_id: None,
         };
 
         if let Err(err) = tx.send(msg).await {
