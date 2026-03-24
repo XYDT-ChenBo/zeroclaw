@@ -857,6 +857,7 @@ mod tests {
             vec!["api.example.com".into()],
             1_000_000,
             30,
+            false,
             placeholders,
         );
         let got = tool

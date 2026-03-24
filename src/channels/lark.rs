@@ -1,22 +1,21 @@
+use super::media_markers::{parse_outgoing_media_markers, OutgoingMediaKind};
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as ProstMessage;
-use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::DnsName;
+use reqwest::multipart::{Form, Part};
 use std::collections::HashMap;
-use std::env;
+use std::path::Path;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::fs;
 use tokio::sync::RwLock;
-use tokio_rustls::client::TlsStream;
-use tokio_rustls::TlsConnector;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
-use tokio_tungstenite::{client_async, WebSocketStream};
-use url::Url;
+use tokio_tungstenite::{client_async_tls_with_config, connect_async, MaybeTlsStream};
 use uuid::Uuid;
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
@@ -106,115 +105,6 @@ impl LarkPlatform {
             Self::Feishu => "feishu",
         }
     }
-}
-
-/// Resolve a HTTP proxy from standard environment variables.
-/// Supports `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`.
-fn resolve_http_proxy_from_env() -> Option<String> {
-    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-        if let Ok(val) = env::var(key) {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Parse `http://user:pass@host:port/...`-style proxy URL into (host, port).
-fn parse_proxy_host_port(proxy: &str) -> Option<(String, u16)> {
-    // Strip scheme if present
-    let without_scheme = if let Some(pos) = proxy.find("://") {
-        &proxy[pos + 3..]
-    } else {
-        proxy
-    };
-    // Strip path
-    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-    // Strip credentials
-    let host_port = host_port.split('@').last().unwrap_or(host_port);
-    let mut parts = host_port.split(':');
-    let host = parts.next()?.trim();
-    if host.is_empty() {
-        return None;
-    }
-    let port = parts
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(80);
-    Some((host.to_string(), port))
-}
-
-/// Establish a TLS WebSocket connection to `wss_url`, optionally via HTTP CONNECT proxy.
-async fn connect_lark_ws(wss_url: &str) -> anyhow::Result<WebSocketStream<TlsStream<TcpStream>>> {
-    let url = Url::parse(wss_url)?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("Lark WS URL missing host: {wss_url}"))?
-        .to_string();
-    let port = url.port().unwrap_or(443);
-
-    let proxy = resolve_http_proxy_from_env();
-    let tcp = if let Some(proxy_str) = proxy {
-        if let Some((proxy_host, proxy_port)) = parse_proxy_host_port(&proxy_str) {
-            let addr = format!("{proxy_host}:{proxy_port}");
-            tracing::info!("Lark: connecting to WS via HTTP proxy {addr}");
-            let mut stream = TcpStream::connect(&addr).await?;
-
-            let connect_req = format!(
-                "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
-            );
-            stream.write_all(connect_req.as_bytes()).await?;
-            stream.flush().await?;
-
-            // Read response headers until CRLF CRLF
-            let mut buf = Vec::with_capacity(1024);
-            loop {
-                let mut tmp = [0u8; 256];
-                let n = stream.read(&mut tmp).await?;
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-                if buf.len() > 8192 {
-                    break;
-                }
-            }
-            let resp = String::from_utf8_lossy(&buf);
-            if !resp.starts_with("HTTP/1.1 200") && !resp.starts_with("HTTP/1.0 200") {
-                anyhow::bail!("Lark: HTTP proxy CONNECT failed: {resp}");
-            }
-
-            stream
-        } else {
-            tracing::warn!("Lark: failed to parse proxy URL '{proxy_str}', connecting directly");
-            TcpStream::connect(format!("{host}:{port}")).await?
-        }
-    } else {
-        TcpStream::connect(format!("{host}:{port}")).await?
-    };
-
-    // TLS handshake using rustls + webpki roots (same pattern as email channel)
-    let certs = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-    };
-    let config = ClientConfig::builder()
-        .with_root_certificates(certs)
-        .with_no_client_auth();
-    let tls_connector: TlsConnector = std::sync::Arc::new(config).into();
-    let host_for_sni = host.clone();
-    let sni: DnsName = host_for_sni
-        .clone()
-        .try_into()
-        .map_err(|e| anyhow::anyhow!("invalid Lark WS host for SNI: {}: {}", host_for_sni, e))?;
-    let tls_stream = tls_connector.connect(sni.into(), tcp).await?;
-
-    let (ws_stream, _resp) = client_async(wss_url, tls_stream).await?;
-    Ok(ws_stream)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -510,8 +400,6 @@ pub struct LarkChannel {
     platform: LarkPlatform,
     /// How to receive events: WebSocket long-connection or HTTP webhook.
     receive_mode: crate::config::schema::LarkReceiveMode,
-    /// Whether WS should respect HTTP(S)_PROXY env vars (config.use_proxy).
-    ws_use_proxy: bool,
     /// Cached tenant access token
     tenant_token: Arc<RwLock<Option<CachedTenantToken>>>,
     /// Dedup set: WS message_ids seen in last ~30 min to prevent double-dispatch
@@ -559,7 +447,6 @@ impl LarkChannel {
             mention_only,
             platform,
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
-            ws_use_proxy: false,
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
             proxy_url: None,
@@ -639,6 +526,107 @@ impl LarkChannel {
 
     fn ws_base(&self) -> &'static str {
         self.platform.ws_base()
+    }
+
+    fn parse_proxy_host_port(proxy_url: &str) -> anyhow::Result<(String, u16)> {
+        let url = reqwest::Url::parse(proxy_url)
+            .map_err(|err| anyhow::anyhow!("invalid proxy_url '{proxy_url}': {err}"))?;
+        let host = url
+            .host_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("proxy_url missing host: {proxy_url}"))?
+            .to_string();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("proxy_url missing port: {proxy_url}"))?;
+        Ok((host, port))
+    }
+
+    fn parse_ws_target_host_port(ws_url: &str) -> anyhow::Result<(String, u16)> {
+        let url = reqwest::Url::parse(ws_url)
+            .map_err(|err| anyhow::anyhow!("invalid websocket URL '{ws_url}': {err}"))?;
+        let host = url
+            .host_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("websocket URL missing host: {ws_url}"))?
+            .to_string();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("websocket URL missing port: {ws_url}"))?;
+        Ok((host, port))
+    }
+
+    async fn connect_ws(
+        &self,
+        ws_url: &str,
+    ) -> anyhow::Result<(
+        tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    )> {
+        let request = ws_url.into_client_request()?;
+        if let Some(proxy_url) = self
+            .proxy_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            let (proxy_host, proxy_port) = Self::parse_proxy_host_port(proxy_url)?;
+            let (target_host, target_port) = Self::parse_ws_target_host_port(ws_url)?;
+            let proxy_addr = format!("{proxy_host}:{proxy_port}");
+            tracing::info!(
+                "Lark: connecting WS via proxy {} -> {}:{}",
+                proxy_addr,
+                target_host,
+                target_port
+            );
+
+            let mut stream = TcpStream::connect(&proxy_addr).await.map_err(|err| {
+                anyhow::anyhow!("Lark WS failed to connect to proxy {}: {}", proxy_addr, err)
+            })?;
+
+            // Minimal HTTP CONNECT tunnel (proxy auth not supported for now).
+            let connect_req = format!(
+                "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n",
+                host = target_host,
+                port = target_port
+            );
+            stream.write_all(connect_req.as_bytes()).await.map_err(|err| {
+                anyhow::anyhow!("Lark WS failed to write CONNECT to proxy {}: {}", proxy_addr, err)
+            })?;
+
+            let mut buf = Vec::with_capacity(1024);
+            let mut tmp = [0u8; 256];
+            loop {
+                let n = stream.read(&mut tmp).await.map_err(|err| {
+                    anyhow::anyhow!(
+                        "Lark WS failed to read CONNECT response from proxy {}: {}",
+                        proxy_addr,
+                        err
+                    )
+                })?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 8 * 1024 {
+                    break;
+                }
+            }
+
+            let resp = String::from_utf8_lossy(&buf);
+            let status_line = resp.lines().next().unwrap_or_default();
+            if !status_line.starts_with("HTTP/1.1 200") && !status_line.starts_with("HTTP/1.0 200")
+            {
+                anyhow::bail!("Lark WS proxy CONNECT failed: {}", status_line);
+            }
+
+            let (stream, response) =
+                client_async_tls_with_config(request, stream, None, None).await?;
+            return Ok((stream, response));
+        }
+
+        let (stream, response) = connect_async(request).await?;
+        Ok((stream, response))
     }
 
     fn tenant_access_token_url(&self) -> String {
@@ -821,41 +809,9 @@ impl LarkChannel {
                     .and_then(|v| v.parse::<i32>().ok())
             })
             .unwrap_or(0);
-        tracing::info!("Lark: connecting to {wss_url} (use_proxy={})", self.ws_use_proxy);
+        tracing::info!("Lark: connecting to {wss_url}");
 
-        let ws_stream = if self.ws_use_proxy {
-            // 带 HTTP(S)_PROXY 支持：通过环境变量解析代理，使用 CONNECT 隧道 + TLS。
-            connect_lark_ws(&wss_url).await?
-        } else {
-            // 不走代理：直接 TcpStream + rustls TLS + client_async。
-            // 这里的实现和 connect_lark_ws 内部的「无代理路径」保持一致，
-            // 保证返回类型相同（WebSocketStream<TlsStream<TcpStream>>）。
-            let url = Url::parse(&wss_url)?;
-            let host = url
-                .host_str()
-                .ok_or_else(|| anyhow::anyhow!("Lark WS URL missing host: {wss_url}"))?
-                .to_string();
-            let port = url.port().unwrap_or(443);
-
-            let tcp = TcpStream::connect(format!("{host}:{port}")).await?;
-
-            let certs = RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-            };
-            let config = ClientConfig::builder()
-                .with_root_certificates(certs)
-                .with_no_client_auth();
-            let tls_connector: TlsConnector = std::sync::Arc::new(config).into();
-            let host_for_sni = host.clone();
-            let sni: DnsName = host_for_sni
-                .clone()
-                .try_into()
-                .map_err(|e| anyhow::anyhow!("invalid Lark WS host for SNI: {}: {}", host_for_sni, e))?;
-            let tls_stream = tls_connector.connect(sni.into(), tcp).await?;
-
-            let (ws_stream, _resp) = client_async(&wss_url, tls_stream).await?;
-            ws_stream
-        };
+        let (ws_stream, _) = self.connect_ws(&wss_url).await?;
         let (mut write, mut read) = ws_stream.split();
         tracing::info!("Lark: WS connected (service_id={service_id})");
 
@@ -1670,6 +1626,16 @@ impl LarkChannel {
     }
 }
 
+/// Lark/Feishu file_type for non-image uploads.
+fn lark_file_type(kind: OutgoingMediaKind) -> &'static str {
+    match kind {
+        OutgoingMediaKind::Image => "image",
+        OutgoingMediaKind::Document => "stream",
+        OutgoingMediaKind::Video => "mp4",
+        OutgoingMediaKind::Audio | OutgoingMediaKind::Voice => "opus",
+    }
+}
+
 #[async_trait]
 impl Channel for LarkChannel {
     fn name(&self) -> &str {
@@ -1677,34 +1643,302 @@ impl Channel for LarkChannel {
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let token = self.get_tenant_access_token().await?;
+        let mut token = self.get_tenant_access_token().await?;
         let url = self.send_message_url();
 
-        let chunks = split_markdown_chunks(&message.content, LARK_CARD_MARKDOWN_MAX_BYTES);
-        for chunk in &chunks {
-            let body = build_interactive_card_body(&message.recipient, chunk);
+        let (cleaned_text, parts) = parse_outgoing_media_markers(&message.content);
 
-            let (status, response) = self.send_text_once(&url, &token, &body).await?;
+        // Send text first (caption-like content) when present.
+        let mut sent_any = false;
+        if !cleaned_text.is_empty() {
+            let content = serde_json::json!({ "text": cleaned_text }).to_string();
+            let body = serde_json::json!({
+                "receive_id": message.recipient,
+                "msg_type": "text",
+                "content": content,
+            });
 
-            if should_refresh_lark_tenant_token(status, &response) {
-                // Token expired/invalid, invalidate and retry once.
-                self.invalidate_token().await;
-                let new_token = self.get_tenant_access_token().await?;
-                let (retry_status, retry_response) =
-                    self.send_text_once(&url, &new_token, &body).await?;
-
-                if should_refresh_lark_tenant_token(retry_status, &retry_response) {
-                    anyhow::bail!(
-                        "Lark send failed after token refresh: status={retry_status}, body={retry_response}"
-                    );
+            let mut retried = false;
+            loop {
+                let (status, response) = self.send_text_once(&url, &token, &body).await?;
+                if should_refresh_lark_tenant_token(status, &response) && !retried {
+                    // Token expired/invalid, invalidate and retry once.
+                    self.invalidate_token().await;
+                    token = self.get_tenant_access_token().await?;
+                    retried = true;
+                    continue;
                 }
-
-                ensure_lark_send_success(retry_status, &retry_response, "after token refresh")?;
-            } else {
-                ensure_lark_send_success(status, &response, "without token refresh")?;
+                ensure_lark_send_success(status, &response, "text message")?;
+                sent_any = true;
+                break;
             }
         }
 
+        // Upload & send local media parts (v1: local paths only).
+        for part in parts {
+            if part.target.starts_with("http://") || part.target.starts_with("https://") {
+                tracing::warn!("lark: unresolved remote media skipped (kind={:?})", part.kind);
+                continue;
+            }
+
+            let path = Path::new(&part.target);
+            if !path.exists() || !path.is_file() {
+                tracing::warn!("lark: unresolved local media skipped (kind={:?})", part.kind);
+                continue;
+            }
+
+            // Read once so retries do not re-read from disk.
+            let file_bytes = match fs::read(path).await {
+                Ok(b) => b,
+                Err(_) => {
+                    tracing::warn!("lark: media read failed (kind={:?})", part.kind);
+                    continue;
+                }
+            };
+
+            match part.kind {
+                OutgoingMediaKind::Image => {
+                    let upload_url = format!("{}/im/v1/images", self.api_base());
+
+                    let mut uploaded_image_key: Option<String> = None;
+                    let mut retried = false;
+                    loop {
+                        let file_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image.bin");
+
+                        let form = Form::new()
+                            .text("image_type", "message")
+                            .part(
+                                "image",
+                                Part::bytes(file_bytes.clone()).file_name(file_name.to_string()),
+                            );
+
+                        let resp = self
+                            .http_client()
+                            .post(&upload_url)
+                            .header("Authorization", format!("Bearer {token}"))
+                            .multipart(form)
+                            .send()
+                            .await;
+
+                        let resp = match resp {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!("lark: image upload request failed");
+                                break;
+                            }
+                        };
+
+                        let status = resp.status();
+                        let raw = resp.text().await.unwrap_or_default();
+                        let body_json = serde_json::from_str::<serde_json::Value>(&raw)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
+
+                        if should_refresh_lark_tenant_token(status, &body_json) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+
+                        if status.is_success()
+                            && body_json
+                                .get("code")
+                                .and_then(|c| c.as_i64())
+                                .unwrap_or(0)
+                                == 0
+                        {
+                            let image_key = body_json
+                                .pointer("/image_key")
+                                .or_else(|| body_json.pointer("/data/image_key"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            uploaded_image_key = image_key;
+                        }
+                        break;
+                    }
+
+                    let Some(image_key) = uploaded_image_key else {
+                        tracing::warn!("lark: image upload failed");
+                        continue;
+                    };
+
+                    // Send image message.
+                    let content = serde_json::json!({ "image_key": image_key }).to_string();
+                    let body = serde_json::json!({
+                        "receive_id": message.recipient,
+                        "msg_type": "image",
+                        "content": content,
+                    });
+
+                    let mut retried = false;
+                    loop {
+                        let (status, response) = match self.send_text_once(&url, &token, &body).await
+                        {
+                            Ok(v) => v,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "lark: image message send request failed (kind={:?})",
+                                    part.kind
+                                );
+                                break;
+                            }
+                        };
+                        if should_refresh_lark_tenant_token(status, &response) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+                        if let Err(_) =
+                            ensure_lark_send_success(status, &response, "image message")
+                        {
+                            tracing::warn!(
+                                "lark: image message send failed (kind={:?})",
+                                part.kind
+                            );
+                            break;
+                        }
+                        sent_any = true;
+                        break;
+                    }
+                }
+                _ => {
+                    let upload_url = format!("{}/im/v1/files", self.api_base());
+                    let file_type = lark_file_type(part.kind);
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attachment.bin")
+                        .to_string();
+
+                    let mut uploaded_file_key: Option<String> = None;
+                    let mut retried = false;
+                    loop {
+                        let form = Form::new()
+                            .text("file_type", file_type)
+                            .text("file_name", filename.clone())
+                            .part(
+                                "file",
+                                Part::bytes(file_bytes.clone()).file_name(filename.clone()),
+                            );
+
+                        let resp = self
+                            .http_client()
+                            .post(&upload_url)
+                            .header("Authorization", format!("Bearer {token}"))
+                            .multipart(form)
+                            .send()
+                            .await;
+
+                        let resp = match resp {
+                            Ok(r) => r,
+                            Err(_) => {
+                                tracing::warn!("lark: file upload request failed (kind={:?})", part.kind);
+                                break;
+                            }
+                        };
+
+                        let status = resp.status();
+                        let raw = resp.text().await.unwrap_or_default();
+                        let body_json = serde_json::from_str::<serde_json::Value>(&raw)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
+
+                        if should_refresh_lark_tenant_token(status, &body_json) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+
+                        if status.is_success()
+                            && body_json
+                                .get("code")
+                                .and_then(|c| c.as_i64())
+                                .unwrap_or(0)
+                                == 0
+                        {
+                            let file_key = body_json
+                                .pointer("/file_key")
+                                .or_else(|| body_json.pointer("/data/file_key"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            uploaded_file_key = file_key;
+                        }
+                        break;
+                    }
+
+                    let Some(file_key) = uploaded_file_key else {
+                        tracing::warn!("lark: file upload failed (kind={:?})", part.kind);
+                        continue;
+                    };
+
+                    let content = serde_json::json!({ "file_key": file_key }).to_string();
+                    let body = serde_json::json!({
+                        "receive_id": message.recipient,
+                        "msg_type": "file",
+                        "content": content,
+                    });
+
+                    let mut retried = false;
+                    loop {
+                        let (status, response) = match self.send_text_once(&url, &token, &body).await
+                        {
+                            Ok(v) => v,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "lark: file message send request failed (kind={:?})",
+                                    part.kind
+                                );
+                                break;
+                            }
+                        };
+                        if should_refresh_lark_tenant_token(status, &response) && !retried {
+                            self.invalidate_token().await;
+                            token = self.get_tenant_access_token().await?;
+                            retried = true;
+                            continue;
+                        }
+                        if let Err(_) =
+                            ensure_lark_send_success(status, &response, "file message")
+                        {
+                            tracing::warn!(
+                                "lark: file message send failed (kind={:?})",
+                                part.kind
+                            );
+                            break;
+                        }
+                        sent_any = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // v1 compatibility: if everything was unresolved/failed and we didn't send
+        // any text, send a fixed placeholder to avoid empty deliveries.
+        if !sent_any {
+            let content = serde_json::json!({ "text": "[empty message]" }).to_string();
+            let body = serde_json::json!({
+                "receive_id": message.recipient,
+                "msg_type": "text",
+                "content": content,
+            });
+            let mut retried = false;
+            loop {
+                let (status, response) = self.send_text_once(&url, &token, &body).await?;
+                if should_refresh_lark_tenant_token(status, &response) && !retried {
+                    self.invalidate_token().await;
+                    token = self.get_tenant_access_token().await?;
+                    retried = true;
+                    continue;
+                }
+                ensure_lark_send_success(status, &response, "empty message")?;
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -2800,7 +3034,6 @@ mod tests {
             encrypt_key: None,
             verification_token: Some("vtoken789".into()),
             allowed_users: vec!["*".into()],
-            use_proxy: false,
             receive_mode: LarkReceiveMode::Webhook,
             port: Some(9898),
             proxy_url: None,
@@ -2977,7 +3210,6 @@ mod tests {
             encrypt_key: None,
             verification_token: Some("vtoken789".into()),
             allowed_users: vec!["*".into()],
-            use_proxy: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Webhook,
             port: Some(9898),
             proxy_url: None,
