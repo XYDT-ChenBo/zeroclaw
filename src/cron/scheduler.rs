@@ -2,8 +2,6 @@ use crate::channels::{
     Channel, DiscordChannel, DingTalkChannel, MattermostChannel, QQChannel, SendMessage,
     SignalChannel, SlackChannel, TelegramChannel,
 };
-#[cfg(feature = "channel-matrix")]
-use crate::channels::MatrixChannel;
 #[cfg(feature = "channel-lark")]
 use crate::channels::LarkChannel;
 use crate::config::Config;
