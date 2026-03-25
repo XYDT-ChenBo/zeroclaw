@@ -54,6 +54,7 @@ pub mod twitter;
 pub mod voice_wake;
 pub mod wati;
 pub mod webhook;
+pub mod webchat;
 pub mod wecom;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
@@ -96,6 +97,7 @@ pub use twitter::TwitterChannel;
 pub use voice_wake::VoiceWakeChannel;
 pub use wati::WatiChannel;
 pub use webhook::WebhookChannel;
+pub use webchat::WebchatChannel;
 pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
@@ -2603,9 +2605,22 @@ async fn process_channel_message(
         let channel = Arc::clone(channel_ref);
         let reply_target = msg.reply_target.clone();
         let draft_id = draft_id_ref.to_string();
+        let stack_draft_updates = if msg.channel == "webchat" {
+            ctx.prompt_config
+                .channels_config
+                .webchat
+                .as_ref()
+                .map_or(false, |wc| wc.stack_draft_updates)
+        } else {
+            true
+        };
         Some(tokio::spawn(async move {
             let mut accumulated = String::new();
             while let Some(delta) = rx.recv().await {
+                if channel.name() == "webchat" && !stack_draft_updates {
+                    let _ = channel.update_draft(&reply_target, &draft_id, &delta).await;
+                    continue;
+                }
                 if delta == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
                     accumulated.clear();
                     continue;
@@ -4525,6 +4540,18 @@ fn collect_configured_channels(
                 wh.send_method.clone(),
                 wh.auth_header.clone(),
                 wh.secret.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref wc) = config.channels_config.webchat {
+        channels.push(ConfiguredChannel {
+            display_name: "Webchat",
+            channel: Arc::new(WebchatChannel::new(
+                wc.port,
+                wc.listen_path.clone(),
+                wc.callback_url.clone(),
+                wc.callback_auth_header.clone(),
             )),
         });
     }
