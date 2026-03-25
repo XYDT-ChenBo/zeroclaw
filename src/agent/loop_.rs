@@ -3044,7 +3044,8 @@ pub(crate) async fn run_tool_call_loop(
         };
         let should_consume_provider_stream = on_delta.is_some()
             && provider.supports_streaming()
-            && (request_tools.is_none() || provider.supports_streaming_tool_events());
+            && (request_tools.is_none() || provider.supports_streaming_tool_events())
+            && (channel_name != "webchat" && channel_name != "daemon");
         let mut streamed_live_deltas = false;
 
         let chat_result = if should_consume_provider_stream {
@@ -3311,8 +3312,8 @@ pub(crate) async fn run_tool_call_loop(
             if !tool_calls.is_empty() {
                 let _ = tx
                     .send(format!(
-                        "{} 我需要先调用 {} 个工具来获取更多信息 (接收此消息耗时 {} 秒)\n",
-                        response_text, tool_calls.len(), llm_secs
+                        "我需要先调用 {} 个工具来获取更多信息 (本次推理耗时 {} 秒)\n",
+                        tool_calls.len(), llm_secs
                     ))
                     .await;
             }
