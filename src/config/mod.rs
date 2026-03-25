@@ -10,7 +10,7 @@ pub use schema::{
     AgentConfig, AssemblyAiSttConfig, AuditConfig, AutonomyConfig, BackupConfig,
     BrowserComputerUseConfig, BrowserConfig, BuiltinHooksConfig, ChannelsConfig,
     ClassificationRule, ClaudeCodeConfig, CloudOpsConfig, ComposioConfig, Config,
-    ConversationalAiConfig, CostConfig, CronConfig, CronJobDecl, CronScheduleDecl,
+    ConversationalAiConfig, CostConfig, CronConfig, CronHttpDeliveryConfig, CronJobDecl, CronScheduleDecl,
     DataRetentionConfig, DeepgramSttConfig, DelegateAgentConfig, DelegateToolConfig, DiscordConfig,
     DockerRuntimeConfig, EdgeTtsConfig, ElevenLabsTtsConfig, EmbeddingRouteConfig, EstopConfig,
     FeishuConfig, GatewayConfig, GoogleSttConfig, GoogleTtsConfig, GoogleWorkspaceAllowedOperation,

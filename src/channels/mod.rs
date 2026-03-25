@@ -659,7 +659,9 @@ fn build_channel_system_prompt(
              reply_target={reply_target}. When scheduling delayed messages or reminders \
              via cron_add for this conversation, use delivery={{\"mode\":\"announce\",\
              \"channel\":\"{channel_name}\",\"to\":\"{reply_target}\"}} so the message \
-             reaches the user."
+             reaches the user. In user-facing confirmation messages for cron creation, do \
+             not proactively mention the concrete delivery channel or target unless the user \
+             explicitly asks where it will be delivered."
         );
         prompt.push_str(&context);
     }

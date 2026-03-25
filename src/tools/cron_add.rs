@@ -47,6 +47,32 @@ impl CronAddTool {
 
         None
     }
+
+    fn should_default_to_app_display(&self) -> bool {
+        self.config.cron_http_delivery.enabled
+            && !self.config.cron_http_delivery.endpoint.trim().is_empty()
+    }
+
+    fn default_agent_delivery_app_display(&self, delivery: Option<DeliveryConfig>) -> Option<DeliveryConfig> {
+        if !self.should_default_to_app_display() {
+            return delivery;
+        }
+
+        let (to, best_effort) = match delivery {
+            Some(cfg) => (
+                cfg.to.filter(|value| !value.trim().is_empty()),
+                cfg.best_effort,
+            ),
+            None => (None, true),
+        };
+
+        Some(DeliveryConfig {
+            mode: "announce".to_string(),
+            channel: Some("app_display".to_string()),
+            to: Some(to.unwrap_or_else(|| "screen-main".to_string())),
+            best_effort,
+        })
+    }
 }
 
 #[async_trait]
@@ -146,7 +172,7 @@ impl Tool for CronAddTool {
                         },
                         "channel": {
                             "type": "string",
-                            "enum": ["telegram", "discord", "slack", "mattermost", "matrix", "qq"],
+                            "enum": ["telegram", "discord", "slack", "mattermost", "matrix", "qq", "http", "app_display"],
                             "description": "Channel type to deliver output to"
                         },
                         "to": {
@@ -331,6 +357,10 @@ impl Tool for CronAddTool {
                     return Ok(blocked);
                 }
 
+                // Agent jobs default to app_display delivery when HTTP delivery is configured.
+                // This also overrides any non-app_display delivery to ensure consistent UX.
+                let delivery = self.default_agent_delivery_app_display(delivery);
+
                 cron::add_agent_job(
                     &self.config,
                     name,
@@ -355,7 +385,8 @@ impl Tool for CronAddTool {
                     "schedule": job.schedule,
                     "next_run": job.next_run,
                     "enabled": job.enabled,
-                    "allowed_tools": job.allowed_tools
+                    "allowed_tools": job.allowed_tools,
+                    "delivery": job.delivery
                 }))?,
                 error: None,
             }),
@@ -384,6 +415,20 @@ mod tests {
         tokio::fs::create_dir_all(&config.workspace_dir)
             .await
             .unwrap();
+        Arc::new(config)
+    }
+
+    async fn test_config_with_http_delivery(tmp: &TempDir) -> Arc<Config> {
+        let mut config = Config {
+            workspace_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        tokio::fs::create_dir_all(&config.workspace_dir)
+            .await
+            .unwrap();
+        config.cron_http_delivery.enabled = true;
+        config.cron_http_delivery.endpoint = "http://127.0.0.1:9999/v1/display".to_string();
         Arc::new(config)
     }
 
@@ -692,6 +737,62 @@ mod tests {
             jobs[0].allowed_tools,
             Some(vec!["file_read".into(), "web_search".into()])
         );
+    }
+
+    #[tokio::test]
+    async fn agent_job_defaults_delivery_to_app_display_when_http_delivery_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_config_with_http_delivery(&tmp).await;
+        let tool = CronAddTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "schedule": { "kind": "cron", "expr": "*/5 * * * *" },
+                "job_type": "agent",
+                "prompt": "check status"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+
+        let jobs = cron::list_jobs(&cfg).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].delivery.mode, "announce");
+        assert_eq!(jobs[0].delivery.channel.as_deref(), Some("app_display"));
+        assert_eq!(jobs[0].delivery.to.as_deref(), Some("screen-main"));
+        assert!(jobs[0].delivery.best_effort);
+    }
+
+    #[tokio::test]
+    async fn agent_job_overrides_non_app_display_delivery_when_http_delivery_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_config_with_http_delivery(&tmp).await;
+        let tool = CronAddTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "schedule": { "kind": "cron", "expr": "*/5 * * * *" },
+                "job_type": "agent",
+                "prompt": "check status",
+                "delivery": {
+                    "mode": "announce",
+                    "channel": "discord",
+                    "to": "keep-this-target",
+                    "best_effort": false
+                }
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+
+        let jobs = cron::list_jobs(&cfg).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].delivery.mode, "announce");
+        assert_eq!(jobs[0].delivery.channel.as_deref(), Some("app_display"));
+        assert_eq!(jobs[0].delivery.to.as_deref(), Some("keep-this-target"));
+        assert!(!jobs[0].delivery.best_effort);
     }
 
     #[tokio::test]

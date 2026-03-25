@@ -3090,7 +3090,9 @@ pub(crate) async fn run_tool_call_loop(
                 let _ = tx
                     .send(format!(
                         "{} 我需要先调用 {} 个工具来获取更多信息 (接收此消息耗时 {} 秒)\n",
-                        response_text, tool_calls.len(), llm_secs
+                        response_text,
+                        tool_calls.len(),
+                        llm_secs
                     ))
                     .await;
             }
@@ -3169,6 +3171,11 @@ pub(crate) async fn run_tool_call_loop(
         let mut executable_calls: Vec<ParsedToolCall> = Vec::new();
 
         for (idx, call) in tool_calls.iter().enumerate() {
+            tracing::warn!(
+                tool = %call.name,
+                args = %call.arguments,
+                "tool_call parsed arguments"
+            );
             // ── Hook: before_tool_call (modifying) ──────────
             let mut tool_name = call.name.clone();
             let mut tool_args = call.arguments.clone();
@@ -4825,7 +4832,7 @@ pub async fn process_message_with_stream(
     )
     .await?;
 
-        // Auto-compaction before hard trimming to preserve long-context signal.
+    // Auto-compaction before hard trimming to preserve long-context signal.
     if let Ok(compacted) = auto_compact_history(
         &mut history,
         provider.as_ref(),

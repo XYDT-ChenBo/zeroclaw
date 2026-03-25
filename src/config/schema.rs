@@ -257,6 +257,10 @@ pub struct Config {
     #[serde(default)]
     pub http_request: HttpRequestConfig,
 
+    /// Cron HTTP delivery configuration (`[cron_http_delivery]`).
+    #[serde(default)]
+    pub cron_http_delivery: CronHttpDeliveryConfig,
+
     /// Multimodal (image) handling configuration (`[multimodal]`).
     #[serde(default)]
     pub multimodal: MultimodalConfig,
@@ -2271,6 +2275,61 @@ impl Default for HttpRequestConfig {
             url_placeholders: HashMap::new(),
         }
     }
+}
+
+/// HTTP delivery configuration used by cron delivery routes.
+///
+/// When enabled, scheduler jobs can deliver execution output to an HTTP endpoint
+/// (for example, an app display API) via delivery channel `http`/`app_display`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronHttpDeliveryConfig {
+    /// Enable cron HTTP delivery target.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base endpoint URL for cron delivery target.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Optional bearer token for Authorization header.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Request timeout in seconds.
+    #[serde(default = "default_cron_http_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Number of retries after first attempt.
+    #[serde(default = "default_cron_http_retry_count")]
+    pub retry_count: u32,
+    /// Backoff delay in milliseconds between retries.
+    #[serde(default = "default_cron_http_backoff_ms")]
+    pub retry_backoff_ms: u64,
+    /// Optional extra headers to include in requests.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+impl Default for CronHttpDeliveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: String::new(),
+            token: None,
+            timeout_secs: default_cron_http_timeout_secs(),
+            retry_count: default_cron_http_retry_count(),
+            retry_backoff_ms: default_cron_http_backoff_ms(),
+            headers: HashMap::new(),
+        }
+    }
+}
+
+fn default_cron_http_timeout_secs() -> u64 {
+    10
+}
+
+fn default_cron_http_retry_count() -> u32 {
+    1
+}
+
+fn default_cron_http_backoff_ms() -> u64 {
+    500
 }
 
 fn default_http_max_response_size() -> usize {
@@ -7257,6 +7316,7 @@ impl Default for Config {
             browser: BrowserConfig::default(),
             browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
+            cron_http_delivery: CronHttpDeliveryConfig::default(),
             multimodal: MultimodalConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),

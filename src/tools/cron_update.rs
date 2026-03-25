@@ -151,7 +151,7 @@ impl Tool for CronUpdateTool {
                                 },
                                 "channel": {
                                     "type": "string",
-                                    "enum": ["telegram", "discord", "slack", "mattermost", "matrix"],
+                                    "enum": ["telegram", "discord", "slack", "mattermost", "matrix", "qq", "http", "app_display"],
                                     "description": "Channel type to deliver output to"
                                 },
                                 "to": {
@@ -473,7 +473,7 @@ mod tests {
             .as_array()
             .expect("patch.delivery.channel must have an enum");
         let channel_strs: Vec<&str> = channel_enum.iter().filter_map(|v| v.as_str()).collect();
-        for ch in &["telegram", "discord", "slack", "mattermost", "matrix"] {
+        for ch in &["telegram", "discord", "slack", "mattermost", "matrix","app_display"] {
             assert!(channel_strs.contains(ch), "delivery.channel missing: {ch}");
         }
     }

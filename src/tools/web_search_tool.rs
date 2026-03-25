@@ -125,24 +125,48 @@ impl WebSearchTool {
 
     async fn search_duckduckgo(&self, query: &str) -> anyhow::Result<String> {
         let encoded_query = urlencoding::encode(query);
-        let search_url = format!("https://html.duckduckgo.com/html/?q={}", encoded_query);
+        // DuckDuckGo 的 HTML 结构会因反爬/地区/会话而变化，导致某些解析分支抓不到结果。
+        // 因此这里做一个轻量兜底：主端点解析为空时，切换到备选端点再解析一次。
+        let fallback_marker = format!("No results found for: {}", query);
+        let search_urls = [
+            format!("https://html.duckduckgo.com/html/?q={}", encoded_query),
+            format!("https://duckduckgo.com/html/?q={}", encoded_query),
+        ];
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .build()?;
 
-        let response = client.get(&search_url).send().await?;
+        let mut last_result = String::new();
+        for (idx, search_url) in search_urls.iter().enumerate() {
+            let response = client.get(search_url).send().await?;
 
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "DuckDuckGo search failed with status: {}",
-                response.status()
+            if !response.status().is_success() {
+                anyhow::bail!(
+                    "DuckDuckGo search failed with status: {} (url={})",
+                    response.status(),
+                    search_url
+                );
+            }
+
+            let html = response.text().await?;
+            let parsed = self.parse_duckduckgo_results(&html, query)?;
+            last_result = parsed.clone();
+
+            if !parsed.starts_with(&fallback_marker) {
+                return Ok(parsed);
+            }
+
+            // 解析为空：继续下一个端点兜底。
+            tracing::debug!(
+                "duckduckgo parsed empty, trying fallback endpoint idx={} provider=duckduckgo query='{}'",
+                idx,
+                query
             );
         }
 
-        let html = response.text().await?;
-        self.parse_duckduckgo_results(&html, query)
+        Ok(last_result)
     }
 
     fn parse_duckduckgo_results(&self, html: &str, query: &str) -> anyhow::Result<String> {
@@ -387,6 +411,18 @@ fn strip_tags(content: &str) -> String {
     re.replace_all(content, "").to_string()
 }
 
+fn preview_for_log(content: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    for (idx, ch) in content.chars().enumerate() {
+        if idx >= max_chars {
+            preview.push_str("...");
+            break;
+        }
+        preview.push(ch);
+    }
+    preview
+}
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -436,6 +472,14 @@ impl Tool for WebSearchTool {
             WebSearchProviderRoute::Brave => self.search_brave(query).await?,
             WebSearchProviderRoute::SearXNG => self.search_searxng(query).await?,
         };
+
+        tracing::debug!(
+            "web_search_tool raw output | provider={} | query='{}' | len={} | preview={}",
+            resolution.canonical_provider,
+            query,
+            result.len(),
+            preview_for_log(&result, 1500)
+        );
 
         Ok(ToolResult {
             success: true,

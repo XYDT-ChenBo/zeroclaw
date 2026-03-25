@@ -280,7 +280,8 @@ async fn persist_job_result(
 ) -> bool {
     let duration_ms = (finished_at - started_at).num_milliseconds();
 
-    if let Err(e) = deliver_if_configured(config, job, output).await {
+
+    if let Err(e) = deliver_if_configured(config, job, output, started_at).await {
         if job.delivery.best_effort {
             tracing::warn!("Cron delivery failed (best_effort): {e}");
         } else {
@@ -376,7 +377,18 @@ fn resolve_matrix_delivery_room(configured_room_id: &str, target: &str) -> Strin
     }
 }
 
-async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> Result<()> {
+async fn deliver_if_configured(
+    config: &Config,
+    job: &CronJob,
+    output: &str,
+    started_at: DateTime<Utc>,
+) -> Result<()> {
+async fn deliver_if_configured(
+    config: &Config,
+    job: &CronJob,
+    output: &str,
+    started_at: DateTime<Utc>,
+) -> Result<()> {
     let delivery: &DeliveryConfig = &job.delivery;
     if !delivery.mode.eq_ignore_ascii_case("announce") {
         return Ok(());
@@ -391,7 +403,8 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("delivery.to is required for announce mode"))?;
 
-    deliver_announcement(config, channel, target, output).await
+    deliver_announcement_with_context(config, Some(job), channel, target, output, started_at).await
+    deliver_announcement_with_context(config, Some(job), channel, target, output, started_at).await
 }
 
 pub(crate) async fn deliver_announcement(
@@ -399,6 +412,28 @@ pub(crate) async fn deliver_announcement(
     channel: &str,
     target: &str,
     output: &str,
+) -> Result<()> {
+    deliver_announcement_with_context(config, None, channel, target, output, Utc::now()).await
+}
+
+pub(crate) async fn deliver_announcement_with_context(
+    config: &Config,
+    job: Option<&CronJob>,
+    channel: &str,
+    target: &str,
+    output: &str,
+    started_at: DateTime<Utc>,
+) -> Result<()> {
+    deliver_announcement_with_context(config, None, channel, target, output, Utc::now()).await
+}
+
+pub(crate) async fn deliver_announcement_with_context(
+    config: &Config,
+    job: Option<&CronJob>,
+    channel: &str,
+    target: &str,
+    output: &str,
+    started_at: DateTime<Utc>,
 ) -> Result<()> {
     match channel.to_ascii_lowercase().as_str() {
         "telegram" => {
@@ -568,10 +603,107 @@ pub(crate) async fn deliver_announcement(
             );
             channel.send(&SendMessage::new(output, target)).await?;
         }
+        "http" | "app_display" => {
+            deliver_http(config, job, target, output, started_at).await?;
+        }
+        "http" | "app_display" => {
+            deliver_http(config, job, target, output, started_at).await?;
+        }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
 
     Ok(())
+}
+
+fn build_http_delivery_payload(
+    job: Option<&CronJob>,
+    target: &str,
+    output: &str,
+    started_at: DateTime<Utc>,
+) -> serde_json::Value {
+    let title = job
+        .and_then(|j| j.name.clone())
+        .unwrap_or_else(|| "cron-notify".to_string());
+    let job_id = job.map_or("manual", |j| j.id.as_str());
+    let id = format!("{}-{}", job_id, started_at.timestamp_millis());
+    
+    serde_json::json!({
+        "id": id,
+        "title": title,
+        "content": output,
+        "format": "markdown",
+        "timestamp": Utc::now().to_rfc3339(),
+        "meta": {
+            "job_id": job_id,
+            "target": target,
+            "channel": "app_display",
+        }
+    })
+}
+
+async fn deliver_http(
+    config: &Config,
+    job: Option<&CronJob>,
+    target: &str,
+    output: &str,
+    started_at: DateTime<Utc>,
+) -> Result<()> {
+    let cfg = &config.cron_http_delivery;
+    if !cfg.enabled {
+        anyhow::bail!("cron_http_delivery is disabled");
+    }
+    let endpoint = cfg.endpoint.trim();
+    if endpoint.is_empty() {
+        anyhow::bail!("cron_http_delivery.endpoint is empty");
+    }
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        anyhow::bail!("cron_http_delivery.endpoint must start with http:// or https://");
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(cfg.timeout_secs.max(1)))
+        .build()?;
+    let payload = build_http_delivery_payload(job, target, output, started_at);
+    let mut headers = cfg.headers.clone();
+    headers
+        .entry("Content-Type".to_string())
+        .or_insert_with(|| "application/json".to_string());
+    if let Some(token) = cfg.token.as_deref() {
+        if !token.trim().is_empty() {
+            headers
+                .entry("Authorization".to_string())
+                .or_insert_with(|| format!("Bearer {}", token.trim()));
+        }
+    }
+
+    let attempts = cfg.retry_count + 1;
+    let mut last_error = String::new();
+    for attempt in 0..attempts {
+        let mut req = client.post(endpoint).json(&payload);
+        for (k, v) in &headers {
+            req = req.header(k, v);
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(());
+                }
+                let body = resp.text().await.unwrap_or_default();
+                last_error = format!("HTTP {}: {}", status, body);
+            }
+            Err(e) => {
+                last_error = e.to_string();
+            }
+        }
+
+        if attempt + 1 < attempts {
+            time::sleep(Duration::from_millis(cfg.retry_backoff_ms.max(1))).await;
+        }
+    }
+
+    anyhow::bail!("cron HTTP delivery failed after {attempts} attempts: {last_error}");
 }
 
 async fn run_job_command(
@@ -1241,7 +1373,12 @@ mod tests {
         let config = test_config(&tmp).await;
         let mut job = test_job("echo ok");
 
-        assert!(deliver_if_configured(&config, &job, "x").await.is_ok());
+        assert!(deliver_if_configured(&config, &job, "x", Utc::now())
+            .await
+            .is_ok());
+        assert!(deliver_if_configured(&config, &job, "x", Utc::now())
+            .await
+            .is_ok());
 
         job.delivery = DeliveryConfig {
             mode: "announce".into(),
@@ -1249,8 +1386,235 @@ mod tests {
             to: Some("target".into()),
             best_effort: true,
         };
-        let err = deliver_if_configured(&config, &job, "x").await.unwrap_err();
+        let err = deliver_if_configured(&config, &job, "x", Utc::now())
+            .await
+            .unwrap_err();
+        let err = deliver_if_configured(&config, &job, "x", Utc::now())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("unsupported delivery channel"));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_http_requires_enabled_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".into(),
+            channel: Some("http".into()),
+            to: Some("screen-main".into()),
+            best_effort: false,
+        };
+
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cron_http_delivery is disabled"));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_app_display_requires_endpoint() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.cron_http_delivery.enabled = true;
+        config.cron_http_delivery.endpoint = String::new();
+
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".into(),
+            channel: Some("app_display".into()),
+            to: Some("screen-main".into()),
+            best_effort: false,
+        };
+
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cron_http_delivery.endpoint is empty"));
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_http_delivery_failure_best_effort_keeps_success() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.cron_http_delivery.enabled = false;
+        let job = cron::add_agent_job(
+            &config,
+            Some("announce-http-best-effort".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("app_display".into()),
+                to: Some("screen-main".into()),
+                best_effort: true,
+            }),
+            false,
+            None,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.last_status.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_http_delivery_failure_non_best_effort_marks_error() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.cron_http_delivery.enabled = false;
+        let job = cron::add_agent_job(
+            &config,
+            Some("announce-http-hard-fail".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("http".into()),
+                to: Some("screen-main".into()),
+                best_effort: false,
+            }),
+            false,
+            None,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(!success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.last_status.as_deref(), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_http_requires_enabled_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".into(),
+            channel: Some("http".into()),
+            to: Some("screen-main".into()),
+            best_effort: false,
+        };
+
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cron_http_delivery is disabled"));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_app_display_requires_endpoint() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.cron_http_delivery.enabled = true;
+        config.cron_http_delivery.endpoint = String::new();
+
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".into(),
+            channel: Some("app_display".into()),
+            to: Some("screen-main".into()),
+            best_effort: false,
+        };
+
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cron_http_delivery.endpoint is empty"));
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_http_delivery_failure_best_effort_keeps_success() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.cron_http_delivery.enabled = false;
+        let job = cron::add_agent_job(
+            &config,
+            Some("announce-http-best-effort".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("app_display".into()),
+                to: Some("screen-main".into()),
+                best_effort: true,
+            }),
+            false,
+            None,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.last_status.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn persist_job_result_http_delivery_failure_non_best_effort_marks_error() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.cron_http_delivery.enabled = false;
+        let job = cron::add_agent_job(
+            &config,
+            Some("announce-http-hard-fail".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("http".into()),
+                to: Some("screen-main".into()),
+                best_effort: false,
+            }),
+            false,
+            None,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        assert!(!success);
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.last_status.as_deref(), Some("error"));
     }
 
     #[test]
@@ -1282,7 +1646,8 @@ mod tests {
             best_effort: false,
         };
 
-        let err = deliver_if_configured(&config, &job, "hello")
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("matrix channel not configured"));
@@ -1301,7 +1666,8 @@ mod tests {
             best_effort: false,
         };
 
-        let err = deliver_if_configured(&config, &job, "hello")
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
+        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
             .await
             .unwrap_err();
         assert!(err

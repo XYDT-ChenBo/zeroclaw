@@ -82,6 +82,24 @@ schedule = { kind = "every", every_ms = 300000 }
 # channel = "telegram"
 # to = "123456789"
 
+# ── Cron HTTP Delivery Configuration ───────────────────────────
+# Enables delivery target channel = "http" or "app_display".
+[cron_http_delivery]
+# Enable HTTP delivery route for cron announcements. Default: false
+enabled = false
+# Full HTTP endpoint (e.g. "http://127.0.0.1:8080/v1/display")
+endpoint = ""
+# Optional bearer token for Authorization header
+token = ""
+# Request timeout in seconds. Default: 10
+timeout_secs = 10
+# Retry count after first attempt. Default: 1
+retry_count = 1
+# Backoff between retries in milliseconds. Default: 500
+retry_backoff_ms = 500
+# Optional extra headers
+# headers = { "X-App-Id" = "zeroclaw" }
+
 
 [gateway.a2a]
 enabled = false
