@@ -6126,6 +6126,8 @@ pub struct ChannelsConfig {
     pub mattermost: Option<MattermostConfig>,
     /// Webhook channel configuration.
     pub webhook: Option<WebhookConfig>,
+    /// Webchat channel configuration (HTTP server + optional SSE streaming).
+    pub webchat: Option<WebchatConfig>,
     /// iMessage channel configuration (macOS only).
     pub imessage: Option<IMessageConfig>,
     /// Matrix channel configuration.
@@ -6310,6 +6312,10 @@ impl ChannelsConfig {
                 Box::new(ConfigWrapper::new(self.voice_wake.as_ref())),
                 self.voice_wake.is_some(),
             ),
+            (
+                Box::new(ConfigWrapper::new(self.webchat.as_ref())),
+                self.webchat.is_some(),
+            ),
         ]
     }
 
@@ -6318,6 +6324,10 @@ impl ChannelsConfig {
         ret.push((
             Box::new(ConfigWrapper::new(self.webhook.as_ref())),
             self.webhook.is_some(),
+        ));
+        ret.push((
+            Box::new(ConfigWrapper::new(self.webchat.as_ref())),
+            self.webchat.is_some(),
         ));
         ret
     }
@@ -6342,6 +6352,7 @@ impl Default for ChannelsConfig {
             slack: None,
             mattermost: None,
             webhook: None,
+            webchat: None,
             imessage: None,
             matrix: None,
             signal: None,
@@ -6686,6 +6697,46 @@ impl ChannelConfig for WebhookConfig {
     }
     fn desc() -> &'static str {
         "HTTP endpoint"
+    }
+}
+
+/// Webchat channel configuration.
+///
+/// Exposes an OpenAI-compatible HTTP endpoint (`/v1/chat/completions`-style subset):
+/// request fields include `model`, `messages`, `stream`, and `session_id`.
+///
+/// - `stream = true`: returns OpenAI-style SSE chunks + `[DONE]` when callback is not configured.
+/// - `stream = false`: returns OpenAI `chat.completion` JSON when callback is not configured.
+///
+/// When `callback_url` is configured, both stream and non-stream outputs are posted
+/// to callback instead of using the request connection as the primary response channel.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebchatConfig {
+    /// Port to listen on for incoming webchat messages.
+    pub port: u16,
+    /// URL path to listen on (default: `/webchat`).
+    #[serde(default)]
+    pub listen_path: Option<String>,
+    /// Whether streaming draft updates should be cumulative ("stacked").
+    ///
+    /// - `true`: each `update_draft` carries the full accumulated text.
+    /// - `false` (default): each `update_draft` carries only the latest delta chunk.
+    #[serde(default = "default_false")]
+    pub stack_draft_updates: bool,
+    /// Optional URL to POST the final response to when not streaming.
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    /// Optional `Authorization` header value for callback requests.
+    #[serde(default)]
+    pub callback_auth_header: Option<String>,
+}
+
+impl ChannelConfig for WebchatConfig {
+    fn name() -> &'static str {
+        "Webchat"
+    }
+    fn desc() -> &'static str {
+        "HTTP + SSE endpoint"
     }
 }
 
@@ -9259,6 +9310,13 @@ impl Config {
                     "config.channels_config.webhook.secret",
                 )?;
             }
+            if let Some(ref mut wc) = config.channels_config.webchat {
+                decrypt_optional_secret(
+                    &store,
+                    &mut wc.callback_auth_header,
+                    "config.channels_config.webchat.callback_auth_header",
+                )?;
+            }
             if let Some(ref mut ct) = config.channels_config.clawdtalk {
                 decrypt_secret(
                     &store,
@@ -10731,6 +10789,13 @@ impl Config {
                 "config.channels_config.webhook.secret",
             )?;
         }
+        if let Some(ref mut wc) = config_to_save.channels_config.webchat {
+            encrypt_optional_secret(
+                &store,
+                &mut wc.callback_auth_header,
+                "config.channels_config.webchat.callback_auth_header",
+            )?;
+        }
         if let Some(ref mut ct) = config_to_save.channels_config.clawdtalk {
             encrypt_secret(
                 &store,
@@ -11443,6 +11508,7 @@ auto_save = true
                 slack: None,
                 mattermost: None,
                 webhook: None,
+                webchat: None,
                 imessage: None,
                 matrix: None,
                 signal: None,
@@ -12436,6 +12502,7 @@ allowed_users = ["@ops:matrix.org"]
             slack: None,
             mattermost: None,
             webhook: None,
+            webchat: None,
             imessage: Some(IMessageConfig {
                 allowed_contacts: vec!["+1".into()],
             }),
@@ -12802,6 +12869,7 @@ channel_ids = ["C123", "D456"]
             slack: None,
             mattermost: None,
             webhook: None,
+            webchat: None,
             imessage: None,
             matrix: None,
             signal: None,

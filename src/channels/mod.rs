@@ -57,6 +57,7 @@ pub mod voice_call;
 pub mod voice_wake;
 pub mod wati;
 pub mod webhook;
+pub mod webchat;
 pub mod wecom;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
@@ -101,6 +102,7 @@ pub use voice_call::{VoiceCallChannel, VoiceCallConfig};
 pub use voice_wake::VoiceWakeChannel;
 pub use wati::WatiChannel;
 pub use webhook::WebhookChannel;
+pub use webchat::WebchatChannel;
 pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
@@ -4799,6 +4801,18 @@ fn collect_configured_channels(
                 wh.send_method.clone(),
                 wh.auth_header.clone(),
                 wh.secret.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref wc) = config.channels_config.webchat {
+        channels.push(ConfiguredChannel {
+            display_name: "Webchat",
+            channel: Arc::new(WebchatChannel::new(
+                wc.port,
+                wc.listen_path.clone(),
+                wc.callback_url.clone(),
+                wc.callback_auth_header.clone(),
             )),
         });
     }

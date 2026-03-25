@@ -512,8 +512,6 @@ pub struct LarkChannel {
     platform: LarkPlatform,
     /// How to receive events: WebSocket long-connection or HTTP webhook.
     receive_mode: crate::config::schema::LarkReceiveMode,
-    /// Whether WS should respect HTTP(S)_PROXY env vars (config.use_proxy).
-    ws_use_proxy: bool,
     /// Cached tenant access token
     tenant_token: Arc<RwLock<Option<CachedTenantToken>>>,
     /// Dedup set: WS message_ids seen in last ~30 min to prevent double-dispatch
@@ -565,7 +563,6 @@ impl LarkChannel {
             mention_only,
             platform,
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
-            ws_use_proxy: false,
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
             proxy_url: None,
@@ -853,7 +850,6 @@ impl LarkChannel {
                     .and_then(|v| v.parse::<i32>().ok())
             })
             .unwrap_or(0);
-        tracing::info!("Lark: connecting to {wss_url} (use_proxy={})", self.ws_use_proxy);
 
         let (ws_stream, _) = crate::config::ws_connect_with_proxy(
             &wss_url,
