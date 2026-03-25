@@ -5738,73 +5738,102 @@ async fn scaffold_workspace(
          (Track unfinished tasks and follow-ups here)\n";
 
     let a2a_setup_skill = "\
-configure the ZeroClaw A2A Gateway for cross-server agent communication. Use when: (1) setting up A2A between two or more instances, (2) user says 'configure A2A', 'set up A2A gateway', 'connect two gateway servers', 'agent-to-agent communication', (3) adding a new A2A peer to an existing setup. Covers: agent card discovery from `base_url`, capability extraction, security tokens, peer registration, network setup (Tailscale/LAN), mandatory `TOOLS.md` recording, and end-to-end verification.
+configure the ZeroClaw A2A Gateway for cross-server agent communication. Use whenever the user wants to connect one or more peer agents and can provide `agent_url` plus token/auth info. Always execute: (1) collect `agent_url` + token, (2) deterministically build Agent Card URL (no inference), (3) fetch and parse capabilities/auth details, (4) write/update `TOOLS.md` with multi-peer profile, (5) return verification checklist.
 
 # A2A Gateway Setup
 
 Configure the ZeroClaw A2A Gateway for cross-server agent-to-agent communication using the A2A v0.3.0 protocol.
 
-## Step 1: User Input (Required)
+## Step 1: Collect User Input (Required)
 
-Ask the user for the peer agent `base_url` only.
+Ask the user for:
+- `agent_url` (required): the peer JSON-RPC endpoint, e.g. `http://100.x.x.x:42617/a2a`
+- `token` (required if peer is protected): bearer/API token for peer authentication
 
-Example:
-- `http://100.x.x.x:42617`
-- `https://agent.example.com`
+If the user gives a base URL instead of `agent_url`, normalize it to:
+- `<base_url>/a2a` as `agent_url`
 
-Do not ask the user to provide the full `agent-card` path.
+Do not ask the user for a full agent card path.
 
-## Step 2: Resolve and Fetch Agent Card (Required)
+## Step 2: Build and Fetch Agent Card URL (Required, No Inference)
 
-Construct the discovery URL with this fixed suffix:
-- `<base_url>/.well-known/agent-card.json`
+Given `agent_url`, use exactly one deterministic rule:
 
-Then call HTTP GET to fetch the card.
+- If `agent_url` ends with `/a2a`, then:
+  - `agent_card_url = <agent_url>/a2a/.well-known/agent-card.json`
+- Otherwise:
+  - `agent_card_url = <agent_url>/.well-known/agent-card.json`
+
+Do not generate candidate lists.
+Do not attempt any extra URL fallback or path guessing.
+
+Fetch this resolved `agent_card_url` directly.
+Include auth header when token exists:
+- `Authorization: Bearer <token>`
+- Request tool policy:
+  - Prefer `curl` when shell supports it.
+  - If `curl` is unavailable, use built-in `http_request` tool (user may call it `http_reqeust`) to perform the same GET request with equivalent headers.
 
 Example:
 ```bash
-curl -fsSL \"<base_url>/.well-known/agent-card.json\"
+curl -fsSL -H 'Authorization: Bearer <token>' '<agent_card_url>'
 ```
 
-If the request fails, stop and return a clear error with the exact URL tried and suggested fixes (network/auth/reverse-proxy/path).
+If this URL fails, stop and return:
+- the exact resolved `agent_card_url`
+- HTTP/status error
+- suggested fixes (network reachability, token validity, reverse proxy path, TLS/cert)
 
-## Step 3: Parse Agent Capability (Required)
+## Step 3: Parse Agent Profile and Capabilities (Required)
 
-From the fetched Agent Card JSON, extract and summarize at least:
-- Agent identity (`name`, `description`, `version`)
-- Endpoint fields (`agent_url`, `agentCardUrl` if present)
-- Supported skills/tools/capabilities (whatever fields are present in the card)
-- Authentication requirements (token, headers, or security scheme)
+From fetched Agent Card JSON, extract and summarize clearly:
+- Identity: `name`, `description`, `version`, `provider` (if present)
+- Endpoints: `agent_url`, `agentCardUrl`, other transport endpoints
+- Capabilities: all declared capabilities/features with short meaning
+- Skills/tools:
+  - each item `name`
+  - each item `description` or purpose
+  - invocation hints/limits if present
+- Input/output modalities if present
+- Auth/security:
+  - security scheme(s)
+  - required header names
+  - whether bearer token is required
+  - scopes/permissions if present
 
 ### URL field rules
 
-| Field  | Points to | Example   |
-| --- | ---| ---|
-| `agent_url`    | JSON-RPC endpoint (default)      | `http://100.x.x.x:42617/a2a`                         |
+| Field          | Points to                        | Example                                                  |
+| -------------- | -------------------------------- | -------------------------------------------------------- |
+| `agent_url`    | JSON-RPC endpoint (default)      | `http://100.x.x.x:42617/a2a`                             |
 | `agentCardUrl` | Agent Card discovery (preferred) | `http://100.x.x.x:42617/a2a/.well-known/agent-card.json` |
 
 **Do NOT confuse these two.** `agent_url` is for sending messages. `agentCardUrl` is for discovery.
 
-## Step 4: Write TOOLS.md (Mandatory, never skip)
+## Step 4: Update TOOLS.md Using Multi-Peer Template (Mandatory, never skip)
 
 **This step is mandatory.** Always write or append an A2A section into the agent's `TOOLS.md` after capability discovery.
 
-Requirements:
-- Record the peer `base_url`
-- Record the resolved `agentCardUrl`
-- Record discovered capability summary from Agent Card
-- Record auth method/token requirements
-- Record how to call this peer through `a2a_client`
+Requirements (single or multiple peers):
+- Record user-provided `agent_url`
+- Record resolved `agentCardUrl` (final successful URL)
+- Record token usage and auth requirements (do not leak full secret; mask it)
+- Record complete capability/skills/tools profile with descriptions
+- Record practical invocation instructions for `a2a_client`
+- If connecting multiple agents, append one peer block per agent in the same A2A registry section
 
 Use `{workspace}/skills/a2a-setup/references/tools-md-template.md` as the base template and replace placeholders with real values from the card and user config.
 
-## Step 5: Final Verification
+## Step 5: Final Verification Output (Required)
 
 Confirm all of the following in the final response:
-1. Agent Card URL fetched successfully
-2. Capability summary extracted
-3. `TOOLS.md` written/updated
-4. A2A peer is ready for invocation via `a2a_client`
+1. `agent_url` and token were received
+2. Agent Card URL was auto-discovered and fetched successfully
+3. Capabilities + skills/tools + auth were extracted
+4. `TOOLS.md` was written/updated from template
+5. Peer is ready for invocation via `a2a_client`
+
+If any item failed, explicitly mark it as failed and explain next action.
 ";
 
     let a2a_tools_md_template = "
@@ -5817,30 +5846,96 @@ Append this section to the agent's `TOOLS.md` file, replacing all `<PLACEHOLDERS
 ```markdown
 ## A2A Gateway (Agent-to-Agent Communication)
 
-You have an A2A Gateway plugin running on port 18800. You can communicate with peer agents on other servers.
+Use `a2a_client` to communicate with peer agents through A2A.
 
-### Peers
+### Peer Registry (Overview)
+| Peer ID | Peer Name | Agent URL | Agent Card URL | Auth | Status |
+| ------- | --------- | --------- | -------------- | ---- | ------ |
+| `<PEER_ID_1>` | `<PEER_NAME_1>` | `<PEER_AGENT_URL_1>` | `<PEER_AGENT_CARD_URL_1>` | `<AUTH_SCHEME_1>` | `<PEER_STATUS_1>` |
+| `<PEER_ID_2>` | `<PEER_NAME_2>` | `<PEER_AGENT_URL_2>` | `<PEER_AGENT_CARD_URL_2>` | `<AUTH_SCHEME_2>` | `<PEER_STATUS_2>` |
 
-| Peer | IP | Auth Token |
-|------|-----|------------|
-| <PEER_NAME> | <PEER_IP> | <PEER_TOKEN> |
+> Add one row per connected peer.
 
-### How to send a message to a peer
+### Peer Detail: <PEER_ID_1>
+- Peer Name: <PEER_NAME_1>
+- Agent URL: <PEER_AGENT_URL_1>
+- Agent Card URL: <PEER_AGENT_CARD_URL_1>
+- Base Origin: <PEER_BASE_ORIGIN_1>
+- Network Reachability: <NETWORK_REACHABILITY_SUMMARY_1>
 
-When the user says \"通过 A2A 让 <PEER_NAME> 做 xxx\" / \"Send to <PEER_NAME>: xxx\" / \"Ask <PEER_NAME> to ...\" or similar, use the a2a_client tool to communicate with other agent:
+#### Authentication
+- Scheme: <AUTH_SCHEME_1>
+- Header: <AUTH_HEADER_NAME_1>
+- Token : <PEER_TOKEN__1>
+- Required Scopes/Permissions: <AUTH_SCOPES_OR_NA_1>
+
+#### Agent Identity
+- Version: <AGENT_VERSION_OR_NA_1>
+- Provider: <AGENT_PROVIDER_OR_NA_1>
+- Description: <AGENT_DESCRIPTION_1>
+
+#### Capabilities (from Agent Card)
+- Capability Summary: <CAPABILITY_SUMMARY_1>
+- Input Modalities: <INPUT_MODALITIES_OR_NA_1>
+- Output Modalities: <OUTPUT_MODALITIES_OR_NA_1>
+- Other Constraints/Limits: <CONSTRAINTS_OR_NA_1>
+
+#### Skills / Tools Exposed by Peer
+| Name | Type | Description | Invocation Notes |
+| ---- | ---- | ----------- | ---------------- |
+| <ITEM_NAME_1_1> | <ITEM_TYPE_1_1> | <ITEM_DESC_1_1> | <ITEM_NOTES_1_1> |
+| <ITEM_NAME_1_2> | <ITEM_TYPE_1_2> | <ITEM_DESC_1_2> | <ITEM_NOTES_1_2> |
+
+> If no skills/tools are listed in the card, write: `No explicit skills/tools declared in Agent Card`.
+
+#### How to invoke this peer
+When the user says 通过 A2A 让 <PEER_NAME_1> 做 xxx / Send to <PEER_NAME_1>: xxx / Ask <PEER_NAME_1> to ..., use `a2a_client` with:
+- `agent_url`: `<PEER_AGENT_URL_1>`
+- auth header: `<AUTH_HEADER_NAME_1>: <TOKEN_AT_RUNTIME>`
+- request intent: the user's original task
+
+#### Last Verified
+- Verified At: <VERIFIED_AT_ISO8601_1>
+- Verification Result: <VERIFICATION_RESULT_1>
+- Notes: <VERIFICATION_NOTES_1>
+
+---
+
+### Peer Detail: <PEER_ID_2>
+Repeat the same detail block for each additional peer.
+```
 
 ---
 
 ## Placeholder Reference
 
-| Placeholder | Description | Example |
-|-------------|-------------|---------|
-| `<PEER_NAME>` | Display name of the peer agent | `Server-A` |
-| `<PEER_IP>` | IP address reachable from this server | `100.76.43.74` |
-| `<PEER_TOKEN>` | The peer's inbound security token | `9489c2c7ce10...` |
-| `<WORKSPACE>` | Agent workspace absolute path | `/home/ubuntu/.openclaw/workspace` |
+Use suffix `_N` for peer index (for example `_1`, `_2`, `_3`).
 
-For multiple peers, add one row per peer to the table.
+| Placeholder Pattern | Description | Example |
+| ------------------- | ----------- | ------- |
+| `<PEER_ID_N>` | Stable peer identifier | `peer-server-a` |
+| `<PEER_NAME_N>` | Display name of peer agent | `Server-A` |
+| `<PEER_AGENT_URL_N>` | Peer JSON-RPC endpoint | `http://100.76.43.74:42617/a2a` |
+| `<PEER_AGENT_CARD_URL_N>` | Resolved working Agent Card URL | `http://100.76.43.74:42617/a2a/.well-known/agent-card.json` |
+| `<PEER_BASE_ORIGIN_N>` | Scheme + host (+port) of peer | `http://100.76.43.74:42617` |
+| `<NETWORK_REACHABILITY_SUMMARY_N>` | Reachability notes from verification | `reachable via tailscale` |
+| `<AUTH_SCHEME_N>` | Auth scheme used by peer | `Bearer` |
+| `<AUTH_HEADER_NAME_N>` | Auth header key | `Authorization` |
+| `<PEER_TOKEN_N>` | Token with  applied | `9489c2...10ab` |
+| `<AUTH_SCOPES_OR_NA_N>` | Required scopes/permissions | `a2a:invoke` |
+| `<AGENT_VERSION_OR_NA_N>` | Agent version | `0.3.0` |
+| `<AGENT_PROVIDER_OR_NA_N>` | Agent provider/owner | `ZeroClaw` |
+| `<AGENT_DESCRIPTION_N>` | Agent purpose summary | `Handles incident triage tasks` |
+| `<CAPABILITY_SUMMARY_N>` | Human-readable capability summary | `supports task execution and tool routing` |
+| `<INPUT_MODALITIES_OR_NA_N>` | Accepted input modalities | `text` |
+| `<OUTPUT_MODALITIES_OR_NA_N>` | Produced output modalities | `text, json` |
+| `<CONSTRAINTS_OR_NA_N>` | Limits and constraints | `max payload 64KB` |
+| `<PEER_STATUS_N>` | Connectivity/health state | `ready` |
+| `<VERIFIED_AT_ISO8601_N>` | Last verification timestamp | `2026-03-25T10:30:00Z` |
+| `<VERIFICATION_RESULT_N>` | Verification result | `success` |
+| `<VERIFICATION_NOTES_N>` | Verification notes | `card fetched and call test passed` |
+
+For multiple peers, keep one shared `## A2A Gateway` section and append one `### Peer Detail: <PEER_ID_N>` block per peer.
 ";
 
     let mut files: Vec<(&str, String)> = vec![

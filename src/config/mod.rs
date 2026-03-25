@@ -33,7 +33,7 @@ pub use schema::{
     StreamMode, SwarmConfig, SwarmStrategy, TelegramConfig, TextBrowserConfig, ToolFilterGroup,
     ToolFilterGroupMode, TranscriptionConfig, TtsConfig, TunnelConfig, VerifiableIntentConfig,
     WebFetchConfig, WebSearchConfig, WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode,
-    WorkspaceConfig, DEFAULT_GWS_SERVICES,A2aConfig,WebchatConfig
+    WorkspaceConfig, DEFAULT_GWS_SERVICES,A2aConfig,WebchatConfig,A2aAgentSkillEntry
 };
 
 pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'static str, bool) {

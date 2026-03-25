@@ -2088,6 +2088,23 @@ impl Default for NodeControlConfig {
     }
 }
 
+/// Manually declared skill on the A2A agent card (`[[gateway.a2a.agent_skills]]` in TOML).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2aAgentSkillEntry {
+    /// Stable skill id (unique on the card).
+    pub id: String,
+    /// Short human-readable title.
+    pub name: String,
+    /// Capability description for remote peers (not tool parameter schemas).
+    pub description: String,
+    /// Optional keywords for discovery.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Optional example user prompts.
+    #[serde(default)]
+    pub examples: Vec<String>,
+}
+
 /// Agent-to-Agent integration configuration (`[gateway.a2a]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct A2aConfig {
@@ -2100,6 +2117,14 @@ pub struct A2aConfig {
     /// Reserved auth switch. Keep false in MVP.
     #[serde(default)]
     pub auth_enabled: bool,
+    /// Optional skill filter for A2A card generation.
+    /// - Empty: include all discovered skills under `<workspace>/skills` (excluding `a2a-setup`).
+    /// - Non-empty: include only discovered skills whose id/name matches one of these values.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Extra agent-card skills defined in config (merged after workspace `skills/`; duplicate ids are skipped).
+    #[serde(default)]
+    pub agent_skills: Vec<A2aAgentSkillEntry>,
 }
 
 fn default_a2a_stream_enabled() -> bool {
@@ -2112,6 +2137,8 @@ impl Default for A2aConfig {
             enabled: false,
             stream_enabled: default_a2a_stream_enabled(),
             auth_enabled: false,
+            skills: Vec::new(),
+            agent_skills: Vec::new(),
         }
     }
 }
