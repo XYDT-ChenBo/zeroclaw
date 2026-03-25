@@ -735,6 +735,19 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         }
     }
 
+    let a2a_public_base = tunnel_url.clone().unwrap_or_else(|| {
+        let advertised_host = normalize_advertised_host(host);
+        format!("http://{advertised_host}:{actual_port}{}", path_prefix.unwrap_or(""))
+    });
+    if config.gateway.a2a.enabled {
+        a2a::init(
+            &config,
+            &a2a_public_base,
+            tools_registry.as_ref().as_slice(),
+        )
+        .context("initialize A2A (agent card / JSON-RPC)")?;
+    }
+
     let pfx = path_prefix.unwrap_or("");
     println!("🦀 ZeroClaw Gateway listening on http://{display_addr}{pfx}");
     if let Some(ref url) = tunnel_url {

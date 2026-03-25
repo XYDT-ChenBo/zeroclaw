@@ -11,10 +11,14 @@ use axum::{
 };
 
 use parking_lot::RwLock;
-use std::sync::OnceLock;
 use ra2a::server::{AgentExecutor, Event, EventQueue, RequestContext, ServerState};
 use ra2a::types::{AgentCapabilities, AgentCard, AgentSkill, Message, Part, Task, TaskState, TaskStatus};
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::OnceLock;
 use std::{future::Future, pin::Pin};
+
+use crate::config::A2aConfig;
 use crate::tools::traits::ToolSpec;
 
 const METHOD_MESSAGE_STREAM: &str = "message/stream";
@@ -31,19 +35,101 @@ fn current_a2a_server_state() -> Option<ra2a::server::ServerState> {
     a2a_server_state_cell().read().clone()
 }
 
-fn build_agent_skills(tool_specs: &[ToolSpec]) -> Vec<AgentSkill> {
-    let mut skills = Vec::with_capacity(tool_specs.len() + 1);
-    skills.push(AgentSkill::new(
-        "chat",
-        "Conversational Assistant",
-        "Answer user requests with tool/memory assisted execution when needed.",
-        vec![
-            "chat".to_string(),
-            "assistant".to_string(),
-            "reasoning".to_string(),
-        ],
-    ));
-    skills
+fn to_skill_id(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn skill_slug(skill: &crate::skills::Skill) -> String {
+    if let Some(location) = &skill.location {
+        if let Some(parent) = location.parent() {
+            if let Some(name) = parent.file_name().and_then(|v| v.to_str()) {
+                return name.to_ascii_lowercase();
+            }
+        }
+    }
+    to_skill_id(&skill.name)
+}
+
+fn build_agent_skills(a2a: &A2aConfig, workspace_dir: &Path, allow_scripts: bool) -> Vec<AgentSkill> {
+    let configured: HashSet<String> = a2a
+        .skills
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let filtered = !configured.is_empty();
+
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut result = Vec::new();
+    let skills_dir = workspace_dir.join("skills");
+    let loaded = crate::skills::load_skills_from_directory(&skills_dir, allow_scripts);
+    for skill in loaded {
+        let slug = skill_slug(&skill);
+        if slug == "a2a-setup" {
+            continue;
+        }
+        let skill_id = to_skill_id(&slug);
+        if skill_id.is_empty() || seen_ids.contains(&skill_id) {
+            continue;
+        }
+        let name_key = skill.name.trim().to_ascii_lowercase();
+        if filtered && !configured.contains(&slug) && !configured.contains(&name_key) && !configured.contains(&skill_id) {
+            continue;
+        }
+
+        let card_skill = AgentSkill::new(
+            skill_id.clone(),
+            skill.name.clone(),
+            skill.description.clone(),
+            skill.tags.clone(),
+        );
+        seen_ids.insert(skill_id);
+        result.push(card_skill);
+    }
+
+    for entry in &a2a.agent_skills {
+        let raw_id = entry.id.trim();
+        if raw_id.is_empty() {
+            tracing::warn!("gateway.a2a.agent_skills: skipping entry with empty id");
+            continue;
+        }
+        let skill_id = to_skill_id(raw_id);
+        if skill_id.is_empty() {
+            tracing::warn!("gateway.a2a.agent_skills: skipping entry with unusable id");
+            continue;
+        }
+        if seen_ids.contains(&skill_id) {
+            tracing::warn!(
+                skill_id = %skill_id,
+                "gateway.a2a.agent_skills: duplicate skill id (workspace or earlier entry wins), skipping"
+            );
+            continue;
+        }
+        let mut card_skill = AgentSkill::new(
+            skill_id.clone(),
+            entry.name.clone(),
+            entry.description.clone(),
+            entry.tags.clone(),
+        );
+        if !entry.examples.is_empty() {
+            card_skill = card_skill.with_examples(entry.examples.clone());
+        }
+        seen_ids.insert(skill_id);
+        result.push(card_skill);
+    }
+
+    result
 }
 
 fn join_url(base: &str, path: &str) -> String {
@@ -57,7 +143,7 @@ fn join_url(base: &str, path: &str) -> String {
 pub fn init(
     config: &crate::config::Config,
     base_url: &str,
-    tool_specs: &[ToolSpec],
+    _tool_specs: &[ToolSpec],
 ) -> Result<()> {
 
     struct ZeroClawExecutor {
@@ -144,7 +230,11 @@ pub fn init(
         state_transition_history: true,
         ..AgentCapabilities::default()
     };
-    card.skills = build_agent_skills(tool_specs);
+    card.skills = build_agent_skills(
+        &config.gateway.a2a,
+        &config.workspace_dir,
+        config.skills.allow_scripts,
+    );
 
     let server_state = ServerState::from_executor(
         ZeroClawExecutor {
@@ -271,6 +361,7 @@ pub async fn handle_a2a_rpc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{A2aAgentSkillEntry, A2aConfig};
     use crate::memory::{Memory, MemoryCategory, MemoryEntry};
     use crate::providers::Provider;
     use crate::security::pairing::PairingGuard;
@@ -281,6 +372,8 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
     use std::time::Duration;
+    use std::{fs, io::Write};
+    use tempfile::tempdir;
     use tower::ServiceExt;
 
     #[derive(Default)]
@@ -389,12 +482,18 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            gmail_push: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
             shutdown_tx: tokio::sync::watch::channel(false).0,
-            node_registry: None,
+            node_registry: Arc::new(crate::gateway::nodes::NodeRegistry::new(16)),
+            path_prefix: String::new(),
+            session_backend: None,
+            device_registry: None,
+            pending_pairings: None,
+            canvas_store: crate::tools::CanvasStore::new(),
         }
     }
 
@@ -517,6 +616,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_agent_skills_reads_workspace_skills_and_excludes_a2a_setup() {
+        let temp = tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        fs::create_dir_all(skills_dir.join("research")).unwrap();
+        fs::create_dir_all(skills_dir.join("a2a-setup")).unwrap();
+        let mut f1 = fs::File::create(skills_dir.join("research").join("SKILL.md")).unwrap();
+        writeln!(f1, "# Research\nFind information fast.").unwrap();
+        let mut f2 = fs::File::create(skills_dir.join("a2a-setup").join("SKILL.md")).unwrap();
+        writeln!(f2, "# A2A Setup Skill\nbootstrap a2a link.").unwrap();
+
+        let mut a2a = A2aConfig::default();
+        let skills = build_agent_skills(&a2a, temp.path(), false);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "research");
+    }
+
+    #[test]
+    fn build_agent_skills_applies_gateway_a2a_skills_filter() {
+        let temp = tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        fs::create_dir_all(skills_dir.join("research")).unwrap();
+        fs::create_dir_all(skills_dir.join("ops")).unwrap();
+        fs::write(
+            skills_dir.join("research").join("SKILL.md"),
+            "# Research\nFind information fast.\n",
+        )
+        .unwrap();
+        fs::write(skills_dir.join("ops").join("SKILL.md"), "# Ops\nDo ops tasks.\n").unwrap();
+
+        let mut a2a = A2aConfig::default();
+        a2a.skills = vec!["ops".into()];
+        let skills = build_agent_skills(&a2a, temp.path(), false);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "ops");
+    }
+
+    #[test]
+    fn build_agent_skills_merges_gateway_a2a_agent_skills() {
+        let temp = tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        fs::create_dir_all(skills_dir.join("research")).unwrap();
+        fs::write(
+            skills_dir.join("research").join("SKILL.md"),
+            "# Research\nFind information fast.\n",
+        )
+        .unwrap();
+
+        let mut a2a = A2aConfig::default();
+        a2a.agent_skills.push(A2aAgentSkillEntry {
+            id: "custom_peer_skill".into(),
+            name: "Custom".into(),
+            description: "Declared only in config.".into(),
+            tags: vec!["custom".into()],
+            examples: vec!["example prompt".into()],
+        });
+        let skills = build_agent_skills(&a2a, temp.path(), false);
+        assert_eq!(skills.len(), 2);
+        let custom = skills.iter().find(|s| s.id == "custom-peer-skill").expect("custom skill");
+        assert_eq!(custom.name, "Custom");
+        assert_eq!(custom.examples, vec!["example prompt".to_string()]);
+    }
+
     #[tokio::test]
     async fn a2a_agent_card_exposes_capabilities_and_skills() {
         let app = router().with_state(test_state(true, false));
@@ -531,9 +693,6 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["capabilities"]["stateTransitionHistory"], true);
         assert_eq!(json["capabilities"]["streaming"], true);
-        assert!(
-            json["skills"].as_array().is_some_and(|skills| !skills.is_empty()),
-            "skills should include at least the base chat capability"
-        );
+        assert!(json["skills"].is_array(), "skills should be present as array");
     }
 }
