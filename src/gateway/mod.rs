@@ -2182,7 +2182,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2241,7 +2240,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2630,7 +2628,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2703,7 +2700,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let headers = HeaderMap::new();
@@ -2788,7 +2784,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let response = handle_webhook(
@@ -2845,7 +2840,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2907,7 +2901,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2974,7 +2967,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let response = Box::pin(handle_nextcloud_talk_webhook(
@@ -3037,7 +3029,6 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
-            node_registry: None,
         };
 
         let mut headers = HeaderMap::new();
