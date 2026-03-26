@@ -27,7 +27,7 @@ jobs:
   validate:
     name: Validate Version
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/feature/feishu_media'
+    if: github.ref == 'refs/heads/xydt_stable'
     outputs:
       tag: ${{ steps.check.outputs.tag }}
     steps:
@@ -113,7 +113,7 @@ jobs:
           name: web-dist
           path: web/dist/
 
-      - uses: ziglang/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
 
