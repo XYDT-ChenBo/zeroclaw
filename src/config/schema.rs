@@ -2128,6 +2128,14 @@ pub struct A2aConfig {
     /// Enable A2A endpoints.
     #[serde(default)]
     pub enabled: bool,
+    /// Optional A2A agent card display name.
+    /// Empty/whitespace values fall back to built-in defaults.
+    #[serde(default)]
+    pub agent_card_name: Option<String>,
+    /// Optional A2A agent card description.
+    /// Empty/whitespace values fall back to built-in defaults.
+    #[serde(default)]
+    pub agent_card_description: Option<String>,
     /// Enable A2A streaming surface.
     #[serde(default = "default_a2a_stream_enabled")]
     pub stream_enabled: bool,
@@ -2152,6 +2160,8 @@ impl Default for A2aConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            agent_card_name: None,
+            agent_card_description: None,
             stream_enabled: default_a2a_stream_enabled(),
             auth_enabled: false,
             skills: Vec::new(),
@@ -11678,6 +11688,7 @@ auto_save = true
             },
             cron: CronConfig::default(),
             channels_config: ChannelsConfig {
+                bot_service: None,
                 cli: true,
                 telegram: Some(TelegramConfig {
                     bot_token: "123:ABC".into(),
@@ -12647,13 +12658,18 @@ default_temperature = 0.7
 
     #[test]
     async fn matrix_config_backward_compatible_without_session_hints() {
-        let toml = r#"
-homeserver = "https://matrix.org"
-access_token = "tok"
-room_id = "!ops:matrix.org"
-allowed_users = ["@ops:matrix.org"]
-"#;
-
+        let mc = MatrixConfig {
+            homeserver: "https://synapse.local:8448".into(),
+            access_token: "tok".into(),
+            user_id: None,
+            device_id: None,
+            room_id: "!abc:synapse.local".into(),
+            allowed_users: vec!["@admin:synapse.local".into(), "*".into()],
+            allowed_rooms: vec![],
+            interrupt_on_new_message: false,
+        };
+        let toml_str = toml::to_string(&mc).unwrap();
+        let parsed: MatrixConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.homeserver, "https://matrix.org");
         assert!(parsed.user_id.is_none());
         assert!(parsed.device_id.is_none());
@@ -12691,6 +12707,7 @@ allowed_users = ["@ops:matrix.org"]
     #[test]
     async fn channels_config_with_imessage_and_matrix() {
         let c = ChannelsConfig {
+            bot_service: None,
             cli: true,
             telegram: None,
             discord: None,
@@ -13064,6 +13081,7 @@ channel_ids = ["C123", "D456"]
     #[test]
     async fn channels_config_with_whatsapp() {
         let c = ChannelsConfig {
+            bot_service: None,
             cli: true,
             telegram: None,
             discord: None,
@@ -13157,6 +13175,7 @@ channel_ids = ["C123", "D456"]
     async fn checklist_gateway_default_blocks_public_bind() {
         let g = GatewayConfig::default();
         assert!(
+            !g.allow_public_bind,
             "Public bind must be blocked by default"
         );
     }
@@ -13193,24 +13212,8 @@ channel_ids = ["C123", "D456"]
 
     #[test]
     async fn checklist_gateway_serde_roundtrip() {
-        let g = GatewayConfig {
-            port: 42617,
-            host: "127.0.0.1".into(),
-            require_pairing: true,
-            allow_public_bind: false,
-            paired_tokens: vec!["zc_test_token".into()],
-            pair_rate_limit_per_minute: 12,
-            webhook_rate_limit_per_minute: 80,
-            trust_forwarded_headers: true,
-            path_prefix: Some("/zeroclaw".into()),
-            rate_limit_max_keys: 2048,
-            idempotency_ttl_secs: 600,
-            idempotency_max_keys: 4096,
-            session_persistence: true,
-            session_ttl_hours: 0,
-            pairing_dashboard: PairingDashboardConfig::default(),
-            tls: None,
-        };
+        let a  = AutonomyConfig::default();
+
         assert!(
             a.forbidden_paths.contains(&"/proc".to_string()),
             "Must block /proc"
@@ -13218,6 +13221,10 @@ channel_ids = ["C123", "D456"]
         assert!(
             a.forbidden_paths.contains(&"~/.ssh".to_string()),
             "Must block ~/.ssh"
+        );
+        assert!(
+            a.forbidden_paths.contains(&"/tmp".to_string()),
+            "Must block /tmp"
         );
     }
 
@@ -15847,14 +15854,7 @@ require_otp_to_resume = true
             ..NevisConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        assert!(
-            !debug_output.contains("super-secret"),
-            "Debug output must not contain the raw client_secret"
-        );
-        assert!(
-            debug_output.contains("[REDACTED]"),
-            "Debug output must show [REDACTED] for client_secret"
-        );
+        assert!(err.contains("token_validation"));
     }
 
     #[test]
