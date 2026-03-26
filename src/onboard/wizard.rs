@@ -6862,7 +6862,7 @@ mod tests {
     async fn scaffold_creates_default_a2a_setup_skill() {
         let tmp = TempDir::new().unwrap();
         let ctx = ProjectContext::default();
-        scaffold_workspace(tmp.path(), &ctx).await.unwrap();
+        scaffold_workspace(tmp.path(), &ctx, "sqlite").await.unwrap();
 
         let skill_path = tmp.path().join("skills").join("a2a-setup").join("SKILL.md");
         assert!(
@@ -7885,7 +7885,6 @@ mod tests {
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec!["*".into()],
-            use_proxy: false,
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,
             proxy_url: None,

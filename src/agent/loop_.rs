@@ -7317,6 +7317,7 @@ mod tests {
                 &[],
                 Some(&activated),
                 None,
+                None,
             )
             .await
             .expect("wrapper path should execute activated tools");
