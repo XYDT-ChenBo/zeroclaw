@@ -27,7 +27,7 @@ jobs:
   validate:
     name: Validate Version
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/xydt_stable'
+    if: github.ref == 'refs/heads/feature/feishu_media'
     outputs:
       tag: ${{ steps.check.outputs.tag }}
     steps:
