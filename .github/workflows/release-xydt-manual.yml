@@ -4,7 +4,7 @@ name: Release Xydt (xydt_stable)
 on:
   push:
     branches:
-      - xydt_stable
+      - feature/feishu_media
   workflow_dispatch:
     inputs:
       version:
