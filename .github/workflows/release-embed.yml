@@ -41,10 +41,15 @@ jobs:
         shell: bash
         env:
           INPUT_BRANCH: ${{ github.event.inputs.branch || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [[ -n "$INPUT_BRANCH" ]]; then
             source_ref="$INPUT_BRANCH"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            # Tag-triggered run: use commit SHA as release target_commitish
+            source_ref="$COMMIT_SHA"
           else
             source_ref="${GITHUB_REF_NAME}"
           fi
