@@ -105,3 +105,9 @@ retry_backoff_ms = 500
 enabled = false
 stream_enabled = true
 auth_enabled = false
+
+[gateway]
+# 当打开时：在 `POST /response` 的 SSE 流式输出中，
+# `is_thinking=true` 阶段只保留“阶段进度(🤔 ...)”和“工具调用进度(⏳/✅/❌ ...)”，
+# 过滤掉纯文本思考过程。
+hide_pure_thinking_text = false

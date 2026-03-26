@@ -1774,6 +1774,17 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub session_ttl_hours: u32,
 
+    /// Hide internal pure-text thinking chunks in streaming chat responses
+    /// (`POST /response`) when `is_thinking=true`.
+    ///
+    /// When enabled, ZeroClaw still preserves:
+    /// - thinking-phase progress lines like `🤔 思考中...` / `🤔 进行第X次推理...`
+    /// - tool-call progress lines like `⏳ 开始调用工具...` / `✅ ...` / `❌ ...`
+    ///
+    /// Default: `false`.
+    #[serde(default = "default_false")]
+    pub hide_pure_thinking_text: bool,
+
     /// Pairing dashboard configuration
     #[serde(default)]
     pub pairing_dashboard: PairingDashboardConfig,
@@ -1891,6 +1902,7 @@ impl Default for GatewayConfig {
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             session_persistence: true,
             session_ttl_hours: 0,
+            hide_pure_thinking_text: default_false(),
             pairing_dashboard: PairingDashboardConfig::default(),
             node_control: NodeControlConfig::default(),
             a2a: A2aConfig::default(),
@@ -11612,9 +11624,7 @@ channel_id = "C123"
     #[test]
     async fn checklist_gateway_default_blocks_public_bind() {
         let g = GatewayConfig::default();
-        assert!(
-            "Public bind must be blocked by default"
-        );
+        assert!("Public bind must be blocked by default");
     }
 
     #[test]
@@ -14368,4 +14378,3 @@ require_otp_to_resume = true
         assert!(identity.contains("IDENTITY.md"));
     }
 }
-

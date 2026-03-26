@@ -1,15 +1,15 @@
+#[cfg(feature = "channel-lark")]
+use crate::channels::LarkChannel;
+#[cfg(feature = "channel-matrix")]
+use crate::channels::MatrixChannel;
 #[cfg(feature = "channel-matrix")]
 use crate::channels::MatrixChannel;
 #[cfg(feature = "whatsapp-web")]
 use crate::channels::WhatsAppWebChannel;
 use crate::channels::{
-    Channel,DingTalkChannel, DiscordChannel, MattermostChannel, QQChannel, SendMessage,
+    Channel, DingTalkChannel, DiscordChannel, MattermostChannel, QQChannel, SendMessage,
     SignalChannel, SlackChannel, TelegramChannel,
 };
-#[cfg(feature = "channel-matrix")]
-use crate::channels::MatrixChannel;
-#[cfg(feature = "channel-lark")]
-use crate::channels::LarkChannel;
 use crate::config::Config;
 use crate::cron::{
     all_overdue_jobs, due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job,
@@ -280,7 +280,6 @@ async fn persist_job_result(
 ) -> bool {
     let duration_ms = (finished_at - started_at).num_milliseconds();
 
-
     if let Err(e) = deliver_if_configured(config, job, output, started_at).await {
         if job.delivery.best_effort {
             tracing::warn!("Cron delivery failed (best_effort): {e}");
@@ -383,12 +382,6 @@ async fn deliver_if_configured(
     output: &str,
     started_at: DateTime<Utc>,
 ) -> Result<()> {
-async fn deliver_if_configured(
-    config: &Config,
-    job: &CronJob,
-    output: &str,
-    started_at: DateTime<Utc>,
-) -> Result<()> {
     let delivery: &DeliveryConfig = &job.delivery;
     if !delivery.mode.eq_ignore_ascii_case("announce") {
         return Ok(());
@@ -404,7 +397,6 @@ async fn deliver_if_configured(
         .ok_or_else(|| anyhow::anyhow!("delivery.to is required for announce mode"))?;
 
     deliver_announcement_with_context(config, Some(job), channel, target, output, started_at).await
-    deliver_announcement_with_context(config, Some(job), channel, target, output, started_at).await
 }
 
 pub(crate) async fn deliver_announcement(
@@ -412,17 +404,6 @@ pub(crate) async fn deliver_announcement(
     channel: &str,
     target: &str,
     output: &str,
-) -> Result<()> {
-    deliver_announcement_with_context(config, None, channel, target, output, Utc::now()).await
-}
-
-pub(crate) async fn deliver_announcement_with_context(
-    config: &Config,
-    job: Option<&CronJob>,
-    channel: &str,
-    target: &str,
-    output: &str,
-    started_at: DateTime<Utc>,
 ) -> Result<()> {
     deliver_announcement_with_context(config, None, channel, target, output, Utc::now()).await
 }
@@ -606,9 +587,7 @@ pub(crate) async fn deliver_announcement_with_context(
         "http" | "app_display" => {
             deliver_http(config, job, target, output, started_at).await?;
         }
-        "http" | "app_display" => {
-            deliver_http(config, job, target, output, started_at).await?;
-        }
+
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
 
@@ -626,7 +605,7 @@ fn build_http_delivery_payload(
         .unwrap_or_else(|| "cron-notify".to_string());
     let job_id = job.map_or("manual", |j| j.id.as_str());
     let id = format!("{}-{}", job_id, started_at.timestamp_millis());
-    
+
     serde_json::json!({
         "id": id,
         "title": title,
@@ -1647,7 +1626,6 @@ mod tests {
         };
 
         let err = deliver_if_configured(&config, &job, "hello", Utc::now())
-        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("matrix channel not configured"));
@@ -1666,7 +1644,6 @@ mod tests {
             best_effort: false,
         };
 
-        let err = deliver_if_configured(&config, &job, "hello", Utc::now())
         let err = deliver_if_configured(&config, &job, "hello", Utc::now())
             .await
             .unwrap_err();

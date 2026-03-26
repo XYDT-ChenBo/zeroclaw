@@ -12,6 +12,20 @@ use uuid::Uuid;
 
 use crate::gateway::AppState;
 
+/// Tool-call progress lines (emitted by `src/agent/loop_.rs`) to keep visible.
+fn is_tool_call_progress(chunk: &str) -> bool {
+    let t = chunk.trim_start();
+    t.starts_with('⏳') || t.starts_with('✅') || t.starts_with('❌')
+}
+
+/// Thinking-phase progress lines (emitted by `src/agent/loop_.rs`) to keep visible.
+fn is_thinking_phase_progress(chunk: &str) -> bool {
+    let t = chunk.trim_start();
+    t.starts_with('🤔')
+        || t.contains("思考中")
+        || (t.contains("进行第") && t.contains("次推理"))
+}
+
 /// OpenAI-compatible chat message.
 #[derive(Deserialize)]
 pub struct OpenAiChatMessage {
@@ -207,6 +221,7 @@ async fn respond_streaming(
 
     let (tx, rx) = mpsc::channel::<String>(16);
     let config = req.config.clone();
+    let hide_pure_thinking_text = config.gateway.hide_pure_thinking_text;
     let user_content = req.user_content.clone();
     let provider_label = req.provider_label.clone();
     let model_label = req.model_label.clone();
@@ -243,6 +258,22 @@ async fn respond_streaming(
             }
         })
         .filter_map(futures_util::future::ready)
+        // Filter out pure-text "thinking" chunks while preserving:
+        // - thinking-phase progress (🤔 ...)
+        // - tool-call progress (⏳/✅/❌ ...)
+        .filter_map(move |(chunk, is_thinking)| {
+            futures_util::future::ready(
+                if hide_pure_thinking_text
+                    && is_thinking
+                    && !is_thinking_phase_progress(&chunk)
+                    && !is_tool_call_progress(&chunk)
+                {
+                    None
+                } else {
+                    Some((chunk, is_thinking))
+                },
+            )
+        })
         .enumerate()
         .map({
             let id = id.clone();
