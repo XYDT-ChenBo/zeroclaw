@@ -1,19 +1,20 @@
-name: Release Xydt (xydt_stable)
+name: Release Xydt (manual)
 
-# 仅在 xydt_stable 分支：构建前端 → 交叉编译 → 上传 GitHub Release。
+# 手动触发：构建前端 → 交叉编译 → 上传 GitHub Release。
 on:
-  push:
-    branches:
-      - feature/feishu_media
   workflow_dispatch:
     inputs:
+      branch:
+        description: "分支名（可选，默认使用 Run workflow 选择的分支）"
+        required: false
+        type: string
       version:
         description: "覆盖版本号（可选，默认使用 Cargo.toml）。格式 X.Y.Z"
         required: false
         type: string
 
 concurrency:
-  group: release-xydt-${{ github.ref }}
+  group: release-xydt-${{ github.event.inputs.branch || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -28,9 +29,26 @@ jobs:
     name: Validate Version
     runs-on: ubuntu-latest
     outputs:
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
       tag: ${{ steps.check.outputs.tag }}
     steps:
+      - name: Resolve source branch
+        id: resolve
+        shell: bash
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.branch || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_BRANCH" ]]; then
+            source_ref="$INPUT_BRANCH"
+          else
+            source_ref="${GITHUB_REF_NAME}"
+          fi
+          echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.resolve.outputs.source_ref }}
       - name: Resolve version and tag
         id: check
         shell: bash
@@ -61,6 +79,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -99,6 +119,8 @@ jobs:
             skip_prometheus: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_ref }}
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: 1.92.0
@@ -146,6 +168,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_ref }}
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -170,18 +194,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
+          SOURCE_REF: ${{ needs.validate.outputs.source_ref }}
         run: |
           set -euo pipefail
           NOTES_FILE=$(mktemp)
-          printf '%s\n' "XYDT 构建（分支 \`xydt_stable\`，commit ${{ github.sha }}）。" > "$NOTES_FILE"
+          printf '%s\n' "XYDT 构建（分支 \`${SOURCE_REF}\`，commit ${{ github.sha }}）。" > "$NOTES_FILE"
           REPO="${{ github.repository }}"
           if gh release view "$TAG" --repo "$REPO" &>/dev/null; then
             gh release upload "$TAG" release-assets/* --clobber --repo "$REPO"
-            gh release edit "$TAG" --notes-file "$NOTES_FILE" --title "$TAG (xydt_stable)" --repo "$REPO"
+            gh release edit "$TAG" --notes-file "$NOTES_FILE" --title "$TAG (${SOURCE_REF})" --repo "$REPO"
           else
             gh release create "$TAG" release-assets/* \
               --repo "$REPO" \
-              --title "$TAG (xydt_stable)" \
+              --title "$TAG (${SOURCE_REF})" \
               --notes-file "$NOTES_FILE" \
-              --target xydt_stable
+              --target "$SOURCE_REF"
           fi
