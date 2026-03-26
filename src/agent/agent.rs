@@ -700,7 +700,7 @@ impl Agent {
                         system,
                         last_user,
                     )
-                })
+                })    
             } else {
                 None
             };
