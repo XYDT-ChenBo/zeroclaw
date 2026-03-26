@@ -210,7 +210,7 @@ jobs:
 
       - name: Create or update GitHub Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
           SOURCE_REF: ${{ needs.validate.outputs.source_ref }}
         run: |
