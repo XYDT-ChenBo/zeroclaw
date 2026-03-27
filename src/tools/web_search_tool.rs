@@ -133,10 +133,11 @@ impl WebSearchTool {
             format!("https://duckduckgo.com/html/?q={}", encoded_query),
         ];
 
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()?;
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let client = builder.build()?;
 
         let mut last_result = String::new();
         for (idx, search_url) in search_urls.iter().enumerate() {
@@ -241,9 +242,9 @@ impl WebSearchTool {
             encoded_query, self.max_results
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(self.timeout_secs))
-            .build()?;
+        let builder = reqwest::Client::builder().timeout(Duration::from_secs(self.timeout_secs));
+        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let client = builder.build()?;
 
         let response = client
             .get(&search_url)
@@ -340,10 +341,11 @@ impl WebSearchTool {
             base_url, encoded_query
         );
 
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
-            .user_agent("ZeroClaw/1.0")
-            .build()?;
+            .user_agent("ZeroClaw/1.0");
+        let builder = crate::config::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let client = builder.build()?;
 
         let response = client
             .get(&search_url)

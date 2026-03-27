@@ -341,7 +341,13 @@ impl Tool for CronAddTool {
                     .map(str::to_string);
                 let allowed_tools = match args.get("allowed_tools") {
                     Some(v) => match serde_json::from_value::<Vec<String>>(v.clone()) {
-                        Ok(v) => Some(v),
+                        Ok(v) => {
+                            if v.is_empty() {
+                                None // Treat empty list same as unset
+                            } else {
+                                Some(v)
+                            }
+                        }
                         Err(e) => {
                             return Ok(ToolResult {
                                 success: false,
@@ -793,6 +799,33 @@ mod tests {
         assert_eq!(jobs[0].delivery.channel.as_deref(), Some("app_display"));
         assert_eq!(jobs[0].delivery.to.as_deref(), Some("keep-this-target"));
         assert!(!jobs[0].delivery.best_effort);
+    }
+
+    #[tokio::test]
+    async fn empty_allowed_tools_stored_as_none() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_config(&tmp).await;
+        let tool = CronAddTool::new(cfg.clone(), test_security(&cfg));
+
+        let result = tool
+            .execute(json!({
+                "schedule": { "kind": "cron", "expr": "*/5 * * * *" },
+                "job_type": "agent",
+                "prompt": "check status",
+                "allowed_tools": []
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+
+        let jobs = cron::list_jobs(&cfg).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].allowed_tools,
+            None,
+            "empty allowed_tools should be stored as None"
+        );
     }
 
     #[tokio::test]

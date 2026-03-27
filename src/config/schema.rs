@@ -39,6 +39,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "tool.composio",
     "tool.http_request",
     "tool.pushover",
+    "tool.web_search",
     "memory.embeddings",
     "tunnel.custom",
     "transcription.groq",
@@ -265,6 +266,10 @@ pub struct Config {
     #[serde(default)]
     pub multimodal: MultimodalConfig,
 
+    /// Automatic media understanding pipeline (`[media_pipeline]`).
+    #[serde(default)]
+    pub media_pipeline: MediaPipelineConfig,
+
     /// Web fetch tool configuration (`[web_fetch]`).
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
@@ -391,6 +396,30 @@ pub struct Config {
     /// Claude Code tool configuration (`[claude_code]`).
     #[serde(default)]
     pub claude_code: ClaudeCodeConfig,
+
+    /// Claude Code task runner with Slack progress and SSH session handoff (`[claude_code_runner]`).
+    #[serde(default)]
+    pub claude_code_runner: ClaudeCodeRunnerConfig,
+
+    /// Codex CLI tool configuration (`[codex_cli]`).
+    #[serde(default)]
+    pub codex_cli: CodexCliConfig,
+
+    /// Gemini CLI tool configuration (`[gemini_cli]`).
+    #[serde(default)]
+    pub gemini_cli: GeminiCliConfig,
+
+    /// OpenCode CLI tool configuration (`[opencode_cli]`).
+    #[serde(default)]
+    pub opencode_cli: OpenCodeCliConfig,
+
+    /// Standard Operating Procedures engine configuration (`[sop]`).
+    #[serde(default)]
+    pub sop: SopConfig,
+
+    /// Shell tool configuration (`[shell_tool]`).
+    #[serde(default)]
+    pub shell_tool: ShellToolConfig,
 }
 
 /// Multi-client workspace isolation configuration.
@@ -811,6 +840,10 @@ pub struct TranscriptionConfig {
     /// Local/self-hosted Whisper-compatible STT provider.
     #[serde(default)]
     pub local_whisper: Option<LocalWhisperConfig>,
+    /// Also transcribe non-PTT (forwarded/regular) audio messages on WhatsApp,
+    /// not just voice notes.  Default: `false` (preserves legacy behavior).
+    #[serde(default)]
+    pub transcribe_non_ptt_audio: bool,
 }
 
 impl Default for TranscriptionConfig {
@@ -829,6 +862,7 @@ impl Default for TranscriptionConfig {
             assemblyai: None,
             google: None,
             local_whisper: None,
+            transcribe_non_ptt_audio: false,
         }
     }
 }
@@ -1170,6 +1204,9 @@ pub struct ToolFilterGroup {
     /// Ignored when `mode = "always"`.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// When true, also filter built-in tools (not just MCP tools).
+    #[serde(default)]
+    pub filter_builtins: bool,
 }
 
 /// OpenAI Whisper STT provider configuration (`[transcription.openai]`).
@@ -1215,7 +1252,7 @@ pub struct GoogleSttConfig {
 
 /// Local/self-hosted Whisper-compatible STT endpoint (`[transcription.local_whisper]`).
 ///
-/// Audio is sent over WireGuard; never leaves the platform perimeter.
+/// Configures a self-hosted STT endpoint. Can be on localhost, a private network host, or any reachable URL.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LocalWhisperConfig {
     /// HTTP or HTTPS endpoint URL, e.g. `"http://10.10.0.1:8001/v1/transcribe"`.
@@ -1286,6 +1323,26 @@ pub struct AgentConfig {
     /// per message. Users can override per-message with `/think:<level>` directives.
     #[serde(default)]
     pub thinking: crate::agent::thinking::ThinkingConfig,
+
+    /// History pruning configuration for token efficiency.
+    #[serde(default)]
+    pub history_pruning: crate::agent::history_pruner::HistoryPrunerConfig,
+
+    /// Enable context-aware tool filtering (only surface relevant tools per iteration).
+    #[serde(default)]
+    pub context_aware_tools: bool,
+
+    /// Post-response quality evaluator configuration.
+    #[serde(default)]
+    pub eval: crate::agent::eval::EvalConfig,
+
+    /// Automatic complexity-based classification fallback.
+    #[serde(default)]
+    pub auto_classify: Option<crate::agent::eval::AutoClassifyConfig>,
+
+    /// Context compression configuration for automatic conversation compaction.
+    #[serde(default)]
+    pub context_compression: crate::agent::context_compressor::ContextCompressionConfig,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -1321,6 +1378,12 @@ impl Default for AgentConfig {
             tool_filter_groups: Vec::new(),
             max_system_prompt_chars: default_max_system_prompt_chars(),
             thinking: crate::agent::thinking::ThinkingConfig::default(),
+            history_pruning: crate::agent::history_pruner::HistoryPrunerConfig::default(),
+            context_aware_tools: false,
+            eval: crate::agent::eval::EvalConfig::default(),
+            auto_classify: None,
+            context_compression:
+                crate::agent::context_compressor::ContextCompressionConfig::default(),
         }
     }
 }
@@ -1332,7 +1395,7 @@ impl Default for AgentConfig {
 /// All fields are optional and default to values that preserve existing
 /// behavior. When set, they extend — not replace — the existing timeout
 /// and loop-detection subsystems.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PacingConfig {
     /// Per-step timeout in seconds: the maximum time allowed for a single
     /// LLM inference turn, independent of the total message budget.
@@ -1360,6 +1423,47 @@ pub struct PacingConfig {
     /// receive a proportionally larger budget without inflating the base timeout.
     #[serde(default)]
     pub message_timeout_scale_max: Option<u64>,
+
+    /// Enable pattern-based loop detection (exact repeat, ping-pong,
+    /// no-progress). Defaults to `true`.
+    #[serde(default = "default_loop_detection_enabled")]
+    pub loop_detection_enabled: bool,
+
+    /// Sliding window size for the pattern-based loop detector.
+    /// Defaults to 20.
+    #[serde(default = "default_loop_detection_window_size")]
+    pub loop_detection_window_size: usize,
+
+    /// Number of consecutive identical tool+args calls before the first
+    /// escalation (Warning). Defaults to 3.
+    #[serde(default = "default_loop_detection_max_repeats")]
+    pub loop_detection_max_repeats: usize,
+}
+
+fn default_loop_detection_enabled() -> bool {
+    true
+}
+
+fn default_loop_detection_window_size() -> usize {
+    20
+}
+
+fn default_loop_detection_max_repeats() -> usize {
+    3
+}
+
+impl Default for PacingConfig {
+    fn default() -> Self {
+        Self {
+            step_timeout_secs: None,
+            loop_detection_min_elapsed_secs: None,
+            loop_ignore_tools: Vec::new(),
+            message_timeout_scale_max: None,
+            loop_detection_enabled: default_loop_detection_enabled(),
+            loop_detection_window_size: default_loop_detection_window_size(),
+            loop_detection_max_repeats: default_loop_detection_max_repeats(),
+        }
+    }
 }
 
 /// Skills loading configuration (`[skills]` section).
@@ -1482,6 +1586,44 @@ impl Default for MultimodalConfig {
     }
 }
 
+// ── Media Pipeline ──────────────────────────────────────────────
+
+/// Automatic media understanding pipeline configuration (`[media_pipeline]`).
+///
+/// When enabled, inbound channel messages with media attachments are
+/// pre-processed before reaching the agent: audio is transcribed, images are
+/// annotated, and videos are summarised.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MediaPipelineConfig {
+    /// Master toggle for the media pipeline (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Transcribe audio attachments using the configured transcription provider.
+    #[serde(default = "default_true")]
+    pub transcribe_audio: bool,
+
+    /// Add image descriptions when a vision-capable model is active.
+    #[serde(default = "default_true")]
+    pub describe_images: bool,
+
+    /// Summarize video attachments (placeholder — requires external API).
+    #[serde(default = "default_true")]
+    pub summarize_video: bool,
+}
+
+impl Default for MediaPipelineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            transcribe_audio: true,
+            describe_images: true,
+            summarize_video: true,
+        }
+    }
+}
+
 // ── Identity (AIEOS / OpenClaw format) ──────────────────────────
 
 /// Identity format configuration (`[identity]` section).
@@ -1519,8 +1661,8 @@ impl Default for IdentityConfig {
 /// Cost tracking and budget enforcement configuration (`[cost]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CostConfig {
-    /// Enable cost tracking (default: false)
-    #[serde(default)]
+    /// Enable cost tracking (default: true)
+    #[serde(default = "default_cost_enabled")]
     pub enabled: bool,
 
     /// Daily spending limit in USD (default: 10.00)
@@ -1568,10 +1710,14 @@ fn default_warn_percent() -> u8 {
     80
 }
 
+fn default_cost_enabled() -> bool {
+    true
+}
+
 impl Default for CostConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             daily_limit_usd: default_daily_limit(),
             monthly_limit_usd: default_monthly_limit(),
             warn_at_percent: default_warn_percent(),
@@ -1821,18 +1967,50 @@ impl Default for NodeControlConfig {
     }
 }
 
+/// Manually declared skill on the A2A agent card (`[[gateway.a2a.agent_skills]]` in TOML).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2aAgentSkillEntry {
+    /// Stable skill id (unique on the card).
+    pub id: String,
+    /// Short human-readable title.
+    pub name: String,
+    /// Capability description for remote peers (not tool parameter schemas).
+    pub description: String,
+    /// Optional keywords for discovery.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Optional example user prompts.
+    #[serde(default)]
+    pub examples: Vec<String>,
+}
 /// Agent-to-Agent integration configuration (`[gateway.a2a]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct A2aConfig {
     /// Enable A2A endpoints.
     #[serde(default)]
     pub enabled: bool,
+    /// Optional A2A agent card display name.
+    /// Empty/whitespace values fall back to built-in defaults.
+    #[serde(default)]
+    pub agent_card_name: Option<String>,
+    /// Optional A2A agent card description.
+    /// Empty/whitespace values fall back to built-in defaults.
+    #[serde(default)]
+    pub agent_card_description: Option<String>,
     /// Enable A2A streaming surface.
     #[serde(default = "default_a2a_stream_enabled")]
     pub stream_enabled: bool,
     /// Reserved auth switch. Keep false in MVP.
     #[serde(default)]
     pub auth_enabled: bool,
+    /// Optional skill filter for A2A card generation.
+    /// - Empty: include all discovered skills under `<workspace>/skills` (excluding `a2a-setup`).
+    /// - Non-empty: include only discovered skills whose id/name matches one of these values.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Extra agent-card skills defined in config (merged after workspace `skills/`; duplicate ids are skipped).
+    #[serde(default)]
+    pub agent_skills: Vec<A2aAgentSkillEntry>,
 }
 
 fn default_a2a_stream_enabled() -> bool {
@@ -1843,8 +2021,12 @@ impl Default for A2aConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            agent_card_name: None,
+            agent_card_description: None,
             stream_enabled: default_a2a_stream_enabled(),
             auth_enabled: false,
+            skills: Vec::new(),
+            agent_skills: Vec::new(),
         }
     }
 }
@@ -2377,6 +2559,61 @@ pub struct WebFetchConfig {
     /// Request timeout in seconds (default: 30)
     #[serde(default = "default_web_fetch_timeout_secs")]
     pub timeout_secs: u64,
+    /// Firecrawl fallback configuration (`[web_fetch.firecrawl]`)
+    #[serde(default)]
+    pub firecrawl: FirecrawlConfig,
+}
+
+/// Firecrawl fallback mode: scrape a single page or crawl linked pages.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FirecrawlMode {
+    #[default]
+    Scrape,
+    /// Reserved for future multi-page crawl support. Accepted in config
+    /// deserialization to avoid breaking existing files, but not yet
+    /// implemented — `fetch_via_firecrawl` always uses the `/scrape` endpoint.
+    Crawl,
+}
+
+/// Firecrawl fallback configuration for JS-heavy and bot-blocked sites.
+///
+/// When enabled, if the standard web fetch fails (HTTP error, empty body, or
+/// body shorter than 100 characters suggesting a JS-only page), the tool
+/// falls back to the Firecrawl API for stealth content extraction.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FirecrawlConfig {
+    /// Enable Firecrawl fallback
+    #[serde(default)]
+    pub enabled: bool,
+    /// Environment variable name for the Firecrawl API key
+    #[serde(default = "default_firecrawl_api_key_env")]
+    pub api_key_env: String,
+    /// Firecrawl API base URL
+    #[serde(default = "default_firecrawl_api_url")]
+    pub api_url: String,
+    /// Firecrawl extraction mode
+    #[serde(default)]
+    pub mode: FirecrawlMode,
+}
+
+fn default_firecrawl_api_key_env() -> String {
+    "FIRECRAWL_API_KEY".into()
+}
+
+fn default_firecrawl_api_url() -> String {
+    "https://api.firecrawl.dev/v1".into()
+}
+
+impl Default for FirecrawlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: default_firecrawl_api_key_env(),
+            api_url: default_firecrawl_api_url(),
+            mode: FirecrawlMode::default(),
+        }
+    }
 }
 
 fn default_web_fetch_max_response_size() -> usize {
@@ -2399,6 +2636,7 @@ impl Default for WebFetchConfig {
             blocked_domains: vec![],
             max_response_size: default_web_fetch_max_response_size(),
             timeout_secs: default_web_fetch_timeout_secs(),
+            firecrawl: FirecrawlConfig::default(),
         }
     }
 }
@@ -2471,6 +2709,32 @@ impl Default for TextBrowserConfig {
             enabled: false,
             preferred_browser: None,
             timeout_secs: default_text_browser_timeout_secs(),
+        }
+    }
+}
+
+// ── Shell tool ───────────────────────────────────────────────────
+
+/// Shell tool configuration (`[shell_tool]` section).
+///
+/// Controls the behaviour of the `shell` execution tool. The main
+/// tunable is `timeout_secs` — the maximum wall-clock time a single
+/// shell command may run before it is killed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ShellToolConfig {
+    /// Maximum shell command execution time in seconds (default: 60).
+    #[serde(default = "default_shell_tool_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_shell_tool_timeout_secs() -> u64 {
+    60
+}
+
+impl Default for ShellToolConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_shell_tool_timeout_secs(),
         }
     }
 }
@@ -3290,6 +3554,174 @@ impl Default for ClaudeCodeConfig {
     }
 }
 
+// ── Claude Code Runner ──────────────────────────────────────────
+
+/// Claude Code task runner configuration (`[claude_code_runner]` section).
+///
+/// Spawns Claude Code in a tmux session with HTTP hooks that POST tool
+/// execution events back to ZeroClaw's gateway, updating a Slack message
+/// in-place with progress plus an SSH handoff link.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ClaudeCodeRunnerConfig {
+    /// Enable the `claude_code_runner` tool
+    #[serde(default)]
+    pub enabled: bool,
+    /// SSH host for session handoff links (e.g. "myhost.example.com")
+    #[serde(default)]
+    pub ssh_host: Option<String>,
+    /// Prefix for tmux session names (default: "zc-claude-")
+    #[serde(default = "default_claude_code_runner_tmux_prefix")]
+    pub tmux_prefix: String,
+    /// Session time-to-live in seconds before auto-cleanup (default: 3600)
+    #[serde(default = "default_claude_code_runner_session_ttl")]
+    pub session_ttl: u64,
+}
+
+fn default_claude_code_runner_tmux_prefix() -> String {
+    "zc-claude-".into()
+}
+
+fn default_claude_code_runner_session_ttl() -> u64 {
+    3600
+}
+
+impl Default for ClaudeCodeRunnerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ssh_host: None,
+            tmux_prefix: default_claude_code_runner_tmux_prefix(),
+            session_ttl: default_claude_code_runner_session_ttl(),
+        }
+    }
+}
+
+// ── Codex CLI ───────────────────────────────────────────────────
+
+/// Codex CLI tool configuration (`[codex_cli]` section).
+///
+/// Delegates coding tasks to the `codex -q` CLI. Authentication uses the
+/// binary's own session by default — no API key needed unless
+/// `env_passthrough` includes `OPENAI_API_KEY`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CodexCliConfig {
+    /// Enable the `codex_cli` tool
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum execution time in seconds (coding tasks can be long)
+    #[serde(default = "default_codex_cli_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Maximum output size in bytes (2MB default)
+    #[serde(default = "default_codex_cli_max_output_bytes")]
+    pub max_output_bytes: usize,
+    /// Extra env vars passed to the codex subprocess (e.g. OPENAI_API_KEY)
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
+}
+
+fn default_codex_cli_timeout_secs() -> u64 {
+    600
+}
+
+fn default_codex_cli_max_output_bytes() -> usize {
+    2_097_152
+}
+
+impl Default for CodexCliConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_secs: default_codex_cli_timeout_secs(),
+            max_output_bytes: default_codex_cli_max_output_bytes(),
+            env_passthrough: Vec::new(),
+        }
+    }
+}
+
+// ── Gemini CLI ──────────────────────────────────────────────────
+
+/// Gemini CLI tool configuration (`[gemini_cli]` section).
+///
+/// Delegates coding tasks to the `gemini -p` CLI. Authentication uses the
+/// binary's own session by default — no API key needed unless
+/// `env_passthrough` includes `GOOGLE_API_KEY`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GeminiCliConfig {
+    /// Enable the `gemini_cli` tool
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum execution time in seconds (coding tasks can be long)
+    #[serde(default = "default_gemini_cli_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Maximum output size in bytes (2MB default)
+    #[serde(default = "default_gemini_cli_max_output_bytes")]
+    pub max_output_bytes: usize,
+    /// Extra env vars passed to the gemini subprocess (e.g. GOOGLE_API_KEY)
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
+}
+
+fn default_gemini_cli_timeout_secs() -> u64 {
+    600
+}
+
+fn default_gemini_cli_max_output_bytes() -> usize {
+    2_097_152
+}
+
+impl Default for GeminiCliConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_secs: default_gemini_cli_timeout_secs(),
+            max_output_bytes: default_gemini_cli_max_output_bytes(),
+            env_passthrough: Vec::new(),
+        }
+    }
+}
+
+// ── OpenCode CLI ───────────────────────────────────────────────
+
+/// OpenCode CLI tool configuration (`[opencode_cli]` section).
+///
+/// Delegates coding tasks to the `opencode run` CLI. Authentication uses the
+/// binary's own session by default — no API key needed unless
+/// `env_passthrough` includes provider-specific keys.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OpenCodeCliConfig {
+    /// Enable the `opencode_cli` tool
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum execution time in seconds (coding tasks can be long)
+    #[serde(default = "default_opencode_cli_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Maximum output size in bytes (2MB default)
+    #[serde(default = "default_opencode_cli_max_output_bytes")]
+    pub max_output_bytes: usize,
+    /// Extra env vars passed to the opencode subprocess
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
+}
+
+fn default_opencode_cli_timeout_secs() -> u64 {
+    600
+}
+
+fn default_opencode_cli_max_output_bytes() -> usize {
+    2_097_152
+}
+
+impl Default for OpenCodeCliConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_secs: default_opencode_cli_timeout_secs(),
+            max_output_bytes: default_opencode_cli_max_output_bytes(),
+            env_passthrough: Vec::new(),
+        }
+    }
+}
+
 // ── Proxy ───────────────────────────────────────────────────────
 
 /// Proxy application scope — determines which outbound traffic uses the proxy.
@@ -3907,6 +4339,317 @@ fn apply_explicit_proxy_to_builder(
     builder
 }
 
+// ── Proxy-aware WebSocket connect ────────────────────────────────
+//
+// `tokio_tungstenite::connect_async` does not honour proxy settings.
+// The helpers below resolve the effective proxy URL for a given service
+// key and, when a proxy is active, establish a tunnelled TCP connection
+// (HTTP CONNECT for http/https proxies, SOCKS5 for socks5/socks5h)
+// before handing the stream to `tokio_tungstenite` for the WebSocket
+// handshake.
+
+/// Combined async IO trait for boxed WebSocket transport streams.
+trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
+
+/// A boxed async IO stream used when a WebSocket connection is tunnelled
+/// through a proxy.  The concrete type varies depending on the proxy
+/// kind (HTTP CONNECT vs SOCKS5) and the target scheme (ws vs wss).
+///
+/// We wrap in a newtype so we can implement `AsyncRead` and `AsyncWrite`
+/// via delegation, since Rust trait objects cannot combine multiple
+/// non-auto traits.
+pub struct BoxedIo(Box<dyn AsyncReadWrite>);
+
+impl tokio::io::AsyncRead for BoxedIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for BoxedIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut *self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_shutdown(cx)
+    }
+}
+
+impl Unpin for BoxedIo {}
+
+/// Convenience alias for the WebSocket stream returned by the proxy-aware
+/// connect helpers.
+pub type ProxiedWsStream = tokio_tungstenite::WebSocketStream<BoxedIo>;
+
+/// Resolve the effective proxy URL for a WebSocket connection to the
+/// given `ws_url`, taking into account the per-channel `proxy_url`
+/// override, the runtime proxy config, scope and no_proxy list.
+fn resolve_ws_proxy_url(
+    service_key: &str,
+    ws_url: &str,
+    channel_proxy_url: Option<&str>,
+) -> Option<String> {
+    // 1. Explicit per-channel proxy always wins.
+    if let Some(url) = normalize_proxy_url_option(channel_proxy_url) {
+        return Some(url);
+    }
+
+    // 2. Consult the runtime proxy config.
+    let cfg = runtime_proxy_config();
+    if !cfg.should_apply_to_service(service_key) {
+        return None;
+    }
+
+    // Check the no_proxy list against the WebSocket target host.
+    if let Ok(parsed) = reqwest::Url::parse(ws_url) {
+        if let Some(host) = parsed.host_str() {
+            let no_proxy_entries = cfg.normalized_no_proxy();
+            if !no_proxy_entries.is_empty() {
+                let host_lower = host.to_ascii_lowercase();
+                let matches_no_proxy = no_proxy_entries.iter().any(|entry| {
+                    let entry = entry.trim().to_ascii_lowercase();
+                    if entry == "*" {
+                        return true;
+                    }
+                    if host_lower == entry {
+                        return true;
+                    }
+                    // Support ".example.com" matching "foo.example.com"
+                    if let Some(suffix) = entry.strip_prefix('.') {
+                        return host_lower.ends_with(suffix) || host_lower == suffix;
+                    }
+                    // Support "example.com" also matching "foo.example.com"
+                    host_lower.ends_with(&format!(".{entry}"))
+                });
+                if matches_no_proxy {
+                    return None;
+                }
+            }
+        }
+    }
+
+    // For wss:// prefer https_proxy, for ws:// prefer http_proxy, fall
+    // back to all_proxy in both cases.
+    let is_secure = ws_url.starts_with("wss://") || ws_url.starts_with("wss:");
+    let preferred = if is_secure {
+        normalize_proxy_url_option(cfg.https_proxy.as_deref())
+    } else {
+        normalize_proxy_url_option(cfg.http_proxy.as_deref())
+    };
+    preferred.or_else(|| normalize_proxy_url_option(cfg.all_proxy.as_deref()))
+}
+
+/// Connect a WebSocket through the configured proxy (if any).
+///
+/// When no proxy applies, this is a thin wrapper around
+/// `tokio_tungstenite::connect_async`.  When a proxy is active the
+/// function tunnels the TCP connection through the proxy before
+/// performing the WebSocket upgrade.
+///
+/// `service_key` is the proxy-service selector (e.g. `"channel.discord"`).
+/// `channel_proxy_url` is the optional per-channel proxy override.
+pub async fn ws_connect_with_proxy(
+    ws_url: &str,
+    service_key: &str,
+    channel_proxy_url: Option<&str>,
+) -> anyhow::Result<(
+    ProxiedWsStream,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    let proxy_url = resolve_ws_proxy_url(service_key, ws_url, channel_proxy_url);
+
+    match proxy_url {
+        None => {
+            // No proxy — delegate directly.
+            let (stream, resp) = tokio_tungstenite::connect_async(ws_url).await?;
+            // Re-wrap the inner stream into our boxed type so the caller
+            // always gets `ProxiedWsStream`.
+            let inner = stream.into_inner();
+            let boxed = BoxedIo(Box::new(inner));
+            let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                boxed,
+                tokio_tungstenite::tungstenite::protocol::Role::Client,
+                None,
+            )
+            .await;
+            Ok((ws, resp))
+        }
+        Some(proxy) => ws_connect_via_proxy(ws_url, &proxy).await,
+    }
+}
+
+/// Establish a WebSocket connection tunnelled through the given proxy URL.
+async fn ws_connect_via_proxy(
+    ws_url: &str,
+    proxy_url: &str,
+) -> anyhow::Result<(
+    ProxiedWsStream,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+
+    let target =
+        reqwest::Url::parse(ws_url).with_context(|| format!("Invalid WebSocket URL: {ws_url}"))?;
+    let target_host = target
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("WebSocket URL has no host: {ws_url}"))?
+        .to_string();
+    let target_port = target
+        .port_or_known_default()
+        .unwrap_or(if target.scheme() == "wss" { 443 } else { 80 });
+
+    let proxy = reqwest::Url::parse(proxy_url)
+        .with_context(|| format!("Invalid proxy URL: {proxy_url}"))?;
+
+    let stream: BoxedIo = match proxy.scheme() {
+        "socks5" | "socks5h" | "socks" => {
+            let proxy_addr = format!(
+                "{}:{}",
+                proxy.host_str().unwrap_or("127.0.0.1"),
+                proxy.port_or_known_default().unwrap_or(1080)
+            );
+            let target_addr = format!("{target_host}:{target_port}");
+            let socks_stream = if proxy.username().is_empty() {
+                tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str())
+                    .await
+                    .with_context(|| format!("SOCKS5 connect to {target_addr} via {proxy_addr}"))?
+            } else {
+                let password = proxy.password().unwrap_or("");
+                tokio_socks::tcp::Socks5Stream::connect_with_password(
+                    proxy_addr.as_str(),
+                    target_addr.as_str(),
+                    proxy.username(),
+                    password,
+                )
+                .await
+                .with_context(|| format!("SOCKS5 auth connect to {target_addr} via {proxy_addr}"))?
+            };
+            let tcp: TcpStream = socks_stream.into_inner();
+            BoxedIo(Box::new(tcp))
+        }
+        "http" | "https" => {
+            let proxy_host = proxy.host_str().unwrap_or("127.0.0.1");
+            let proxy_port = proxy.port_or_known_default().unwrap_or(8080);
+            let proxy_addr = format!("{proxy_host}:{proxy_port}");
+
+            let mut tcp = TcpStream::connect(&proxy_addr)
+                .await
+                .with_context(|| format!("TCP connect to HTTP proxy {proxy_addr}"))?;
+
+            // Send HTTP CONNECT request.
+            let connect_req = format!(
+                "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n\r\n"
+            );
+            tcp.write_all(connect_req.as_bytes()).await?;
+
+            // Read the response (we only need the status line).
+            let mut buf = vec![0u8; 4096];
+            let mut total = 0usize;
+            loop {
+                let n = tcp.read(&mut buf[total..]).await?;
+                if n == 0 {
+                    anyhow::bail!("HTTP CONNECT proxy closed connection before response");
+                }
+                total += n;
+                // Look for end of HTTP headers.
+                if let Some(pos) = find_header_end(&buf[..total]) {
+                    let status_line = std::str::from_utf8(&buf[..pos])
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("");
+                    if !status_line.contains("200") {
+                        anyhow::bail!(
+                            "HTTP CONNECT proxy returned non-200 response: {status_line}"
+                        );
+                    }
+                    break;
+                }
+                if total >= buf.len() {
+                    anyhow::bail!("HTTP CONNECT proxy response too large");
+                }
+            }
+
+            BoxedIo(Box::new(tcp))
+        }
+        scheme => {
+            anyhow::bail!("Unsupported proxy scheme '{scheme}' for WebSocket connections");
+        }
+    };
+
+    // If the target is wss://, wrap in TLS.
+    let is_secure = target.scheme() == "wss";
+    let stream: BoxedIo = if is_secure {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_config = std::sync::Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+        let connector = tokio_rustls::TlsConnector::from(tls_config);
+        let server_name = rustls_pki_types::ServerName::try_from(target_host.clone())
+            .with_context(|| format!("Invalid TLS server name: {target_host}"))?;
+
+        // `stream` is `BoxedIo` — we need a concrete `AsyncRead + AsyncWrite`
+        // for `TlsConnector::connect`.  Since `BoxedIo` already satisfies
+        // those bounds we can pass it directly.
+        let tls_stream = connector
+            .connect(server_name, stream)
+            .await
+            .with_context(|| format!("TLS handshake with {target_host}"))?;
+        BoxedIo(Box::new(tls_stream))
+    } else {
+        stream
+    };
+
+    // Perform the WebSocket client handshake over the tunnelled stream.
+    let ws_request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(ws_url)
+        .header("Host", format!("{target_host}:{target_port}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .with_context(|| "Failed to build WebSocket upgrade request")?;
+
+    let (ws_stream, response) = tokio_tungstenite::client_async(ws_request, stream)
+        .await
+        .with_context(|| format!("WebSocket handshake failed for {ws_url}"))?;
+
+    Ok((ws_stream, response))
+}
+
+/// Find the `\r\n\r\n` boundary marking the end of HTTP headers.
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
 fn parse_proxy_scope(raw: &str) -> Option<ProxyScope> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "environment" | "env" => Some(ProxyScope::Environment),
@@ -3969,6 +4712,18 @@ pub struct StorageProviderConfig {
     /// Optional connection timeout in seconds for remote providers.
     #[serde(default)]
     pub connect_timeout_secs: Option<u64>,
+
+    /// Enable pgvector extension for hybrid vector+keyword recall.
+    #[serde(default)]
+    pub pgvector_enabled: bool,
+
+    /// Vector dimensions for pgvector embeddings (default: 1536).
+    #[serde(default = "default_pgvector_dimensions")]
+    pub pgvector_dimensions: usize,
+}
+
+fn default_pgvector_dimensions() -> usize {
+    1536
 }
 
 fn default_storage_schema() -> String {
@@ -3987,6 +4742,8 @@ impl Default for StorageProviderConfig {
             schema: default_storage_schema(),
             table: default_storage_table(),
             connect_timeout_secs: None,
+            pgvector_enabled: false,
+            pgvector_dimensions: default_pgvector_dimensions(),
         }
     }
 }
@@ -4526,6 +5283,10 @@ impl Default for AutonomyConfig {
                 "head".into(),
                 "tail".into(),
                 "date".into(),
+                "python".into(),
+                "python3".into(),
+                "pip".into(),
+                "node".into(),
             ],
             forbidden_paths: vec![
                 "/etc".into(),
@@ -5263,6 +6024,8 @@ pub struct ChannelsConfig {
     pub mattermost: Option<MattermostConfig>,
     /// Webhook channel configuration.
     pub webhook: Option<WebhookConfig>,
+    /// Webchat channel configuration (HTTP server + optional SSE streaming).
+    pub webchat: Option<WebchatConfig>,
     /// iMessage channel configuration (macOS only).
     pub imessage: Option<IMessageConfig>,
     /// Matrix channel configuration.
@@ -5440,6 +6203,10 @@ impl ChannelsConfig {
                 Box::new(ConfigWrapper::new(self.voice_wake.as_ref())),
                 self.voice_wake.is_some(),
             ),
+            (
+                Box::new(ConfigWrapper::new(self.webchat.as_ref())),
+                self.webchat.is_some(),
+            ),
         ]
     }
 
@@ -5448,6 +6215,10 @@ impl ChannelsConfig {
         ret.push((
             Box::new(ConfigWrapper::new(self.webhook.as_ref())),
             self.webhook.is_some(),
+        ));
+        ret.push((
+            Box::new(ConfigWrapper::new(self.webchat.as_ref())),
+            self.webchat.is_some(),
         ));
         ret
     }
@@ -5472,6 +6243,7 @@ impl Default for ChannelsConfig {
             slack: None,
             mattermost: None,
             webhook: None,
+            webchat: None,
             imessage: None,
             matrix: None,
             signal: None,
@@ -5671,6 +6443,10 @@ pub struct SlackConfig {
     /// Optional channel ID to restrict the bot to a single channel.
     /// Omit (or set `"*"`) to listen across all accessible channels.
     pub channel_id: Option<String>,
+    /// Optional explicit list of channel IDs to watch.
+    /// When set, this takes precedence over `channel_id`.
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
     /// Allowed Slack user IDs. Empty = deny all.
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -5770,6 +6546,46 @@ impl ChannelConfig for WebhookConfig {
     }
     fn desc() -> &'static str {
         "HTTP endpoint"
+    }
+}
+
+/// Webchat channel configuration.
+///
+/// Exposes an OpenAI-compatible HTTP endpoint (`/v1/chat/completions`-style subset):
+/// request fields include `model`, `messages`, `stream`, and `session_id`.
+///
+/// - `stream = true`: returns OpenAI-style SSE chunks + `[DONE]` when callback is not configured.
+/// - `stream = false`: returns OpenAI `chat.completion` JSON when callback is not configured.
+///
+/// When `callback_url` is configured, both stream and non-stream outputs are posted
+/// to callback instead of using the request connection as the primary response channel.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebchatConfig {
+    /// Port to listen on for incoming webchat messages.
+    pub port: u16,
+    /// URL path to listen on (default: `/webchat`).
+    #[serde(default)]
+    pub listen_path: Option<String>,
+    /// Whether streaming draft updates should be cumulative ("stacked").
+    ///
+    /// - `true`: each `update_draft` carries the full accumulated text.
+    /// - `false` (default): each `update_draft` carries only the latest delta chunk.
+    #[serde(default = "default_false")]
+    pub stack_draft_updates: bool,
+    /// Optional URL to POST the final response to when not streaming.
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    /// Optional `Authorization` header value for callback requests.
+    #[serde(default)]
+    pub callback_auth_header: Option<String>,
+}
+
+impl ChannelConfig for WebchatConfig {
+    fn name() -> &'static str {
+        "Webchat"
+    }
+    fn desc() -> &'static str {
+        "HTTP + SSE endpoint"
     }
 }
 
@@ -7330,6 +8146,7 @@ impl Default for Config {
             http_request: HttpRequestConfig::default(),
             cron_http_delivery: CronHttpDeliveryConfig::default(),
             multimodal: MultimodalConfig::default(),
+            media_pipeline: MediaPipelineConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),
             text_browser: TextBrowserConfig::default(),
@@ -7361,6 +8178,12 @@ impl Default for Config {
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
             claude_code: ClaudeCodeConfig::default(),
+            claude_code_runner: ClaudeCodeRunnerConfig::default(),
+            codex_cli: CodexCliConfig::default(),
+            gemini_cli: GeminiCliConfig::default(),
+            opencode_cli: OpenCodeCliConfig::default(),
+            sop: SopConfig::default(),
+            shell_tool: ShellToolConfig::default(),
         }
     }
 }
@@ -7378,6 +8201,12 @@ struct ActiveWorkspaceState {
 }
 
 fn default_config_dir() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Ok(PathBuf::from(home).join(".zeroclaw"));
+        }
+    }
+
     let home = UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
         .context("Could not find home directory")?;
@@ -8265,6 +9094,13 @@ impl Config {
                     &store,
                     &mut wh.secret,
                     "config.channels_config.webhook.secret",
+                )?;
+            }
+            if let Some(ref mut wc) = config.channels_config.webchat {
+                decrypt_optional_secret(
+                    &store,
+                    &mut wc.callback_auth_header,
+                    "config.channels_config.webchat.callback_auth_header",
                 )?;
             }
             if let Some(ref mut ct) = config.channels_config.clawdtalk {
@@ -9715,6 +10551,13 @@ impl Config {
                 "config.channels_config.webhook.secret",
             )?;
         }
+        if let Some(ref mut wc) = config_to_save.channels_config.webchat {
+            encrypt_optional_secret(
+                &store,
+                &mut wc.callback_auth_header,
+                "config.channels_config.webchat.callback_auth_header",
+            )?;
+        }
         if let Some(ref mut ct) = config_to_save.channels_config.clawdtalk {
             encrypt_secret(
                 &store,
@@ -9862,6 +10705,70 @@ async fn sync_directory(path: &Path) -> Result<()> {
     {
         let _ = path;
         Ok(())
+    }
+}
+
+// ── SOP engine configuration ───────────────────────────────────
+
+/// Standard Operating Procedures engine configuration (`[sop]`).
+///
+/// The `default_execution_mode` field uses the `SopExecutionMode` type from
+/// `sop::types` (re-exported via `sop::SopExecutionMode`). To avoid circular
+/// module references, config stores it using the same enum definition.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SopConfig {
+    /// Directory containing SOP definitions (subdirs with SOP.toml + SOP.md).
+    /// Falls back to `<workspace>/sops` when omitted.
+    #[serde(default)]
+    pub sops_dir: Option<String>,
+
+    /// Default execution mode for SOPs that omit `execution_mode`.
+    /// Values: `auto`, `supervised` (default), `step_by_step`,
+    /// `priority_based`, `deterministic`.
+    #[serde(default = "default_sop_execution_mode")]
+    pub default_execution_mode: String,
+
+    /// Maximum total concurrent SOP runs across all SOPs.
+    #[serde(default = "default_sop_max_concurrent_total")]
+    pub max_concurrent_total: usize,
+
+    /// Approval timeout in seconds. When a run waits for approval longer than
+    /// this, Critical/High-priority SOPs auto-approve; others stay waiting.
+    /// Set to 0 to disable timeout.
+    #[serde(default = "default_sop_approval_timeout_secs")]
+    pub approval_timeout_secs: u64,
+
+    /// Maximum number of finished runs kept in memory for status queries.
+    /// Oldest runs are evicted when over capacity. 0 = unlimited.
+    #[serde(default = "default_sop_max_finished_runs")]
+    pub max_finished_runs: usize,
+}
+
+fn default_sop_execution_mode() -> String {
+    "supervised".to_string()
+}
+
+fn default_sop_max_concurrent_total() -> usize {
+    4
+}
+
+fn default_sop_approval_timeout_secs() -> u64 {
+    300
+}
+
+fn default_sop_max_finished_runs() -> usize {
+    100
+}
+
+impl Default for SopConfig {
+    fn default() -> Self {
+        Self {
+            sops_dir: None,
+            default_execution_mode: default_sop_execution_mode(),
+            max_concurrent_total: default_sop_max_concurrent_total(),
+            approval_timeout_secs: default_sop_approval_timeout_secs(),
+            max_finished_runs: default_sop_max_finished_runs(),
+        }
     }
 }
 
@@ -10255,6 +11162,7 @@ default_temperature = 0.7
             },
             cron: CronConfig::default(),
             channels_config: ChannelsConfig {
+                bot_service: None,
                 cli: true,
                 telegram: Some(TelegramConfig {
                     bot_token: "123:ABC".into(),
@@ -10271,6 +11179,7 @@ default_temperature = 0.7
                 slack: None,
                 mattermost: None,
                 webhook: None,
+                webchat: None,
                 imessage: None,
                 matrix: None,
                 signal: None,
@@ -10313,6 +11222,7 @@ default_temperature = 0.7
             browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
+            media_pipeline: MediaPipelineConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),
             text_browser: TextBrowserConfig::default(),
@@ -10345,6 +11255,12 @@ default_temperature = 0.7
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
             claude_code: ClaudeCodeConfig::default(),
+            claude_code_runner: ClaudeCodeRunnerConfig::default(),
+            codex_cli: CodexCliConfig::default(),
+            gemini_cli: GeminiCliConfig::default(),
+            opencode_cli: OpenCodeCliConfig::default(),
+            sop: SopConfig::default(),
+            shell_tool: ShellToolConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -10830,6 +11746,7 @@ default_temperature = 0.7
             browser_delegate: crate::tools::browser_delegate::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
+            media_pipeline: MediaPipelineConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),
             text_browser: TextBrowserConfig::default(),
@@ -10862,6 +11779,12 @@ default_temperature = 0.7
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
             claude_code: ClaudeCodeConfig::default(),
+            claude_code_runner: ClaudeCodeRunnerConfig::default(),
+            codex_cli: CodexCliConfig::default(),
+            gemini_cli: GeminiCliConfig::default(),
+            opencode_cli: OpenCodeCliConfig::default(),
+            sop: SopConfig::default(),
+            shell_tool: ShellToolConfig::default(),
         };
 
         config.save().await.unwrap();
@@ -11183,7 +12106,7 @@ access_token = "tok"
 room_id = "!ops:matrix.org"
 allowed_users = ["@ops:matrix.org"]
 "#;
-
+        let parsed: MatrixConfig = toml::from_str(toml).unwrap();
         assert_eq!(parsed.homeserver, "https://matrix.org");
         assert!(parsed.user_id.is_none());
         assert!(parsed.device_id.is_none());
@@ -11221,6 +12144,7 @@ allowed_users = ["@ops:matrix.org"]
     #[test]
     async fn channels_config_with_imessage_and_matrix() {
         let c = ChannelsConfig {
+            bot_service: None,
             cli: true,
             telegram: None,
             discord: None,
@@ -11228,6 +12152,7 @@ allowed_users = ["@ops:matrix.org"]
             slack: None,
             mattermost: None,
             webhook: None,
+            webchat: None,
             imessage: Some(IMessageConfig {
                 allowed_contacts: vec!["+1".into()],
             }),
@@ -11305,6 +12230,7 @@ allowed_users = ["@ops:matrix.org"]
     async fn slack_config_deserializes_without_allowed_users() {
         let json = r#"{"bot_token":"xoxb-tok"}"#;
         let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.channel_ids.is_empty());
         assert!(parsed.allowed_users.is_empty());
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.thread_replies, None);
@@ -11315,7 +12241,19 @@ allowed_users = ["@ops:matrix.org"]
     async fn slack_config_deserializes_with_allowed_users() {
         let json = r#"{"bot_token":"xoxb-tok","allowed_users":["U111"]}"#;
         let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.channel_ids.is_empty());
         assert_eq!(parsed.allowed_users, vec!["U111"]);
+        assert!(!parsed.interrupt_on_new_message);
+        assert_eq!(parsed.thread_replies, None);
+        assert!(!parsed.mention_only);
+    }
+
+    #[test]
+    async fn slack_config_deserializes_with_channel_ids() {
+        let json = r#"{"bot_token":"xoxb-tok","channel_ids":["C111","D222"]}"#;
+        let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.channel_ids, vec!["C111", "D222"]);
+        assert!(parsed.allowed_users.is_empty());
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.thread_replies, None);
         assert!(!parsed.mention_only);
@@ -11380,11 +12318,27 @@ bot_token = "xoxb-tok"
 channel_id = "C123"
 "#;
         let parsed: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.channel_ids.is_empty());
         assert!(parsed.allowed_users.is_empty());
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.thread_replies, None);
         assert!(!parsed.mention_only);
         assert_eq!(parsed.channel_id.as_deref(), Some("C123"));
+    }
+
+    #[test]
+    async fn slack_config_toml_accepts_channel_ids() {
+        let toml_str = r#"
+bot_token = "xoxb-tok"
+channel_ids = ["C123", "D456"]
+"#;
+        let parsed: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.channel_ids, vec!["C123", "D456"]);
+        assert!(parsed.allowed_users.is_empty());
+        assert!(!parsed.interrupt_on_new_message);
+        assert_eq!(parsed.thread_replies, None);
+        assert!(!parsed.mention_only);
+        assert!(parsed.channel_id.is_none());
     }
 
     #[test]
@@ -11541,6 +12495,7 @@ channel_id = "C123"
     #[test]
     async fn channels_config_with_whatsapp() {
         let c = ChannelsConfig {
+            bot_service: None,
             cli: true,
             telegram: None,
             discord: None,
@@ -11548,6 +12503,7 @@ channel_id = "C123"
             slack: None,
             mattermost: None,
             webhook: None,
+            webchat: None,
             imessage: None,
             matrix: None,
             signal: None,
@@ -11659,24 +12615,8 @@ channel_id = "C123"
     }
 
     #[test]
-    async fn checklist_gateway_serde_roundtrip() {
-        let g = GatewayConfig {
-            port: 42617,
-            host: "127.0.0.1".into(),
-            require_pairing: true,
-            allow_public_bind: false,
-            paired_tokens: vec!["zc_test_token".into()],
-            pair_rate_limit_per_minute: 12,
-            webhook_rate_limit_per_minute: 80,
-            trust_forwarded_headers: true,
-            path_prefix: Some("/zeroclaw".into()),
-            rate_limit_max_keys: 2048,
-            idempotency_ttl_secs: 600,
-            idempotency_max_keys: 4096,
-            session_persistence: true,
-            session_ttl_hours: 0,
-            pairing_dashboard: PairingDashboardConfig::default(),
-        };
+    async fn checklist_autonomy_default_forbidden_paths() {
+        let a = AutonomyConfig::default();
         assert!(
             a.forbidden_paths.contains(&"/proc".to_string()),
             "Must block /proc"
@@ -11684,6 +12624,10 @@ channel_id = "C123"
         assert!(
             a.forbidden_paths.contains(&"~/.ssh".to_string()),
             "Must block ~/.ssh"
+        );
+        assert!(
+            a.forbidden_paths.contains(&"/tmp".to_string()),
+            "Must block /tmp"
         );
     }
 
@@ -12555,6 +13499,10 @@ default_model = "legacy-model"
         let custom_config_dir = temp_home.join("profiles").join("agent-alpha");
 
         fs::create_dir_all(&custom_config_dir).await.unwrap();
+        // Pre-create the default dir so is_temp_directory() can canonicalize
+        // the path on macOS (where /var → /private/var symlink requires
+        // the directory to exist for canonicalize to resolve correctly).
+        fs::create_dir_all(&temp_default_dir).await.unwrap();
         fs::write(
             custom_config_dir.join("config.toml"),
             "default_temperature = 0.7\ndefault_model = \"persisted-profile\"\n",
@@ -13464,6 +14412,7 @@ default_model = "persisted-profile"
         assert_eq!(tc.model, "whisper-large-v3-turbo");
         assert!(tc.language.is_none());
         assert_eq!(tc.max_duration_secs, 120);
+        assert!(!tc.transcribe_non_ptt_audio);
     }
 
     #[test]
@@ -14126,14 +15075,7 @@ require_otp_to_resume = true
             ..NevisConfig::default()
         };
         let err = cfg.validate().unwrap_err();
-        assert!(
-            !debug_output.contains("super-secret"),
-            "Debug output must not contain the raw client_secret"
-        );
-        assert!(
-            debug_output.contains("[REDACTED]"),
-            "Debug output must show [REDACTED] for client_secret"
-        );
+        assert!(err.contains("token_validation"));
     }
 
     #[test]
@@ -14339,9 +15281,9 @@ require_otp_to_resume = true
 
     // ── Bootstrap files ─────────────────────────────────────
 
-    #[test]
+    #[tokio::test]
     async fn ensure_bootstrap_files_creates_missing_files() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let ws = tmp.path().join("workspace");
         let _: () = tokio::fs::create_dir_all(&ws).await.unwrap();
 
@@ -14355,9 +15297,9 @@ require_otp_to_resume = true
         assert!(identity.contains("IDENTITY.md"));
     }
 
-    #[test]
+    #[tokio::test]
     async fn ensure_bootstrap_files_does_not_overwrite_existing() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let ws = tmp.path().join("workspace");
         let _: () = tokio::fs::create_dir_all(&ws).await.unwrap();
 
@@ -14378,4 +15320,84 @@ require_otp_to_resume = true
             .unwrap();
         assert!(identity.contains("IDENTITY.md"));
     }
+
+    // ── PacingConfig serde defaults ─────────────────────────────
+
+    #[test]
+    async fn pacing_config_serde_defaults_match_manual_default() {
+        // Deserialise an empty TOML table and verify the loop-detection
+        // fields receive the same defaults as `PacingConfig::default()`.
+        let from_toml: PacingConfig = toml::from_str("").unwrap();
+        let manual = PacingConfig::default();
+
+        assert_eq!(
+            from_toml.loop_detection_enabled,
+            manual.loop_detection_enabled
+        );
+        assert_eq!(
+            from_toml.loop_detection_window_size,
+            manual.loop_detection_window_size
+        );
+        assert_eq!(
+            from_toml.loop_detection_max_repeats,
+            manual.loop_detection_max_repeats
+        );
+
+        // Verify concrete values so a silent change to the defaults is caught.
+        assert!(from_toml.loop_detection_enabled, "default should be true");
+        assert_eq!(from_toml.loop_detection_window_size, 20);
+        assert_eq!(from_toml.loop_detection_max_repeats, 3);
+    }
+
+    // ── Docker baked config template ────────────────────────────
+
+    /// The TOML template baked into Docker images (Dockerfile + Dockerfile.debian).
+    /// Kept here so changes to the Dockerfiles can be validated by `cargo test`.
+    const DOCKER_CONFIG_TEMPLATE: &str = r#"
+workspace_dir = "/zeroclaw-data/workspace"
+config_path = "/zeroclaw-data/.zeroclaw/config.toml"
+api_key = ""
+default_provider = "openrouter"
+default_model = "anthropic/claude-sonnet-4-20250514"
+default_temperature = 0.7
+
+[gateway]
+port = 42617
+host = "[::]"
+allow_public_bind = true
+
+[autonomy]
+level = "supervised"
+auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory_store", "web_search_tool", "web_fetch", "calculator", "glob_search", "content_search", "image_info", "weather", "git_operations"]
+"#;
+
+    #[test]
+    async fn docker_config_template_is_parseable() {
+        let cfg: Config = toml::from_str(DOCKER_CONFIG_TEMPLATE)
+            .expect("Docker baked config.toml must be valid TOML that deserialises into Config");
+
+        // The [autonomy] section must be present and contain the expected tools.
+        let auto = &cfg.autonomy.auto_approve;
+        for tool in &[
+            "file_read",
+            "file_write",
+            "file_edit",
+            "memory_recall",
+            "memory_store",
+            "web_search_tool",
+            "web_fetch",
+            "calculator",
+            "glob_search",
+            "content_search",
+            "image_info",
+            "weather",
+            "git_operations",
+        ] {
+            assert!(
+                auto.iter().any(|t| t == tool),
+                "Docker config auto_approve missing expected tool: {tool}"
+            );
+        }
+    }
 }
+
