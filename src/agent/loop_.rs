@@ -4070,11 +4070,16 @@ pub async fn run(
         ];
 
         // Compute per-turn excluded MCP tools from tool_filter_groups.
-        let excluded_tools = compute_excluded_mcp_tools(
+        let mut excluded_tools = compute_excluded_mcp_tools(
             &tools_registry,
             &config.agent.tool_filter_groups,
             &effective_msg,
         );
+        // Non-interactive callers (cron/daemon/gateway-style `run`) must honor
+        // non-CLI exclusions at runtime, not only in prompt descriptions.
+        if !interactive {
+            excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
+        }
 
         #[allow(unused_assignments)]
         let mut response = String::new();

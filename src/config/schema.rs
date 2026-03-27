@@ -1781,8 +1781,8 @@ pub struct GatewayConfig {
     /// - thinking-phase progress lines like `🤔 思考中...` / `🤔 进行第X次推理...`
     /// - tool-call progress lines like `⏳ 开始调用工具...` / `✅ ...` / `❌ ...`
     ///
-    /// Default: `false`.
-    #[serde(default = "default_false")]
+    /// Default: `true`.
+    #[serde(default = "default_true")]
     pub hide_pure_thinking_text: bool,
 
     /// Pairing dashboard configuration
@@ -1902,7 +1902,7 @@ impl Default for GatewayConfig {
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             session_persistence: true,
             session_ttl_hours: 0,
-            hide_pure_thinking_text: default_false(),
+            hide_pure_thinking_text: default_true(),
             pairing_dashboard: PairingDashboardConfig::default(),
             node_control: NodeControlConfig::default(),
             a2a: A2aConfig::default(),
@@ -9965,6 +9965,7 @@ mod tests {
             c.skills.prompt_injection_mode,
             SkillsPromptInjectionMode::Full
         );
+        assert!(c.gateway.hide_pure_thinking_text);
         assert_eq!(c.provider_timeout_secs, 120);
         assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
         assert!(c.config_path.to_string_lossy().contains("config.toml"));

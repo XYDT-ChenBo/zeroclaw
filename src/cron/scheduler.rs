@@ -608,15 +608,16 @@ fn build_http_delivery_payload(
 
     serde_json::json!({
         "id": id,
-        "title": title,
+        // "title": title,
         "content": output,
-        "format": "markdown",
-        "timestamp": Utc::now().to_rfc3339(),
-        "meta": {
-            "job_id": job_id,
-            "target": target,
-            "channel": "app_display",
-        }
+        // "format": "markdown",
+        // "timestamp": Utc::now().to_rfc3339(),
+        "continueListening":true,
+        // "meta": {
+        //     "job_id": job_id,
+        //     "target": target,
+        //     "channel": "app_display",
+        // }
     })
 }
 

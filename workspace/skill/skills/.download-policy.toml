@@ -1,0 +1,7 @@
+version = 1
+trusted_domains = []
+blocked_domains = []
+
+[aliases]
+find-skills = "https://skills.sh/vercel-labs/skills/find-skills"
+skill-creator = "https://skills.sh/anthropics/skills/skill-creator"
