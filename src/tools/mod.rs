@@ -223,7 +223,7 @@ use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::{SecurityPolicy, create_sandbox};
-use crate::_nodes::ConnectedNodeRegistry;
+use crate::dt_nodes_registry::ConnectedNodeRegistry;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
