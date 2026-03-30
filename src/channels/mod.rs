@@ -2280,6 +2280,20 @@ fn spawn_scoped_typing_task(
     handle
 }
 
+fn render_channel_error(err: &anyhow::Error) -> String {
+    let raw = err.to_string();
+    // Fallback: don't dump raw provider JSON to users.
+    let lower = raw.to_lowercase();
+    if raw.contains("429")
+        || (lower.contains("too many requests") && lower.contains("429"))
+        || (lower.contains("rate") && lower.contains("limit"))
+    {
+        return "⚠️ 请求过于频繁（429）。请稍后再试。".to_string();
+    }
+
+    "⚠️ 模型调用失败，请稍后再试。".to_string()
+}
+
 async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: traits::ChannelMessage,
@@ -3218,13 +3232,15 @@ async fn process_channel_message(
                 }
                 if let Some(channel) = target_channel.as_ref() {
                     if let Some(ref draft_id) = draft_message_id {
+                        let error_text = render_channel_error(&e);
                         let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
+                            .finalize_draft(&msg.reply_target, draft_id, &error_text)
                             .await;
                     } else {
+                        let error_text = render_channel_error(&e);
                         let _ = channel
                             .send(
-                                &SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
+                                &SendMessage::new(error_text, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
                             )
                             .await;
@@ -5499,6 +5515,16 @@ mod tests {
         assert_eq!(channel_message_timeout_budget_secs(300, 1), 300);
         assert_eq!(channel_message_timeout_budget_secs(300, 2), 600);
         assert_eq!(channel_message_timeout_budget_secs(300, 3), 900);
+    }
+
+    #[test]
+    fn render_channel_error_falls_back_to_unified_message() {
+        let raw = r#"some provider error: {"code": 9999, "detail": "no message field here"}"#;
+        let err = anyhow::anyhow!(raw);
+
+        let rendered = render_channel_error(&err);
+        assert!(rendered.contains("⚠️ 模型调用失败"));
+        assert!(!rendered.contains(r#"{"code": 9999"#), "should not leak raw JSON: {rendered}");
     }
 
     #[test]
