@@ -90,8 +90,23 @@ pub async fn run_loop(
                         break Ok(());
                     };
 
-                    let Message::Text(text) = message? else {
-                        continue;
+                    let message = match message {
+                        Ok(message) => message,
+                        Err(e) => break Err(e.into()),
+                    };
+                    let text = match message {
+                        Message::Text(text) => text,
+                        Message::Close(frame) => {
+                            tracing::info!(
+                                "zeroclaw node websocket closed by server: {:?}",
+                                frame
+                            );
+                            break Ok(());
+                        }
+                        _ => {
+                            tracing::warn!("zeroclaw node websocket received unexpected message: {:?}", message);
+                            continue;
+                        }
                     };
 
                     let parsed: Value = match serde_json::from_str(&text) {
@@ -104,11 +119,13 @@ pub async fn run_loop(
                     if frame_type == "event" && event == "connect.challenge" {
                         let nonce = parsed["payload"]["nonce"].as_str().unwrap_or("").to_string();
                         let connect = build_connect_request(identity, nonce);
-                        sink.send(Message::Text(connect.to_string().into()))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("failed to send connect frame: {e}"))?;
+                        if let Err(e) = sink.send(Message::Text(connect.to_string().into())).await {
+                            break Err(anyhow::anyhow!("failed to send connect frame: {e}"));
+                        }
                     } else if frame_type == "event" && event == "node.invoke.request" {
-                        handle_invoke_request(&mut sink, identity, &parsed).await?;
+                        if let Err(e) = handle_invoke_request(&mut sink, identity, &parsed).await {
+                            break Err(e);
+                        }
                     }
                 }
             }
