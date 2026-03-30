@@ -153,6 +153,10 @@ fn build_connect_request(identity: &NodeIdentityFile, nonce: String) -> serde_js
     let caps = vec!["system", "file", "camera"];
     let commands = vec!["system.run", "media.saveImage", "camera.snap"];
 
+    let auth = serde_json::json!({
+        "token": identity.gateway.token.clone(),
+    });
+
     serde_json::json!({
         "type": "req",
         "id": uuid::Uuid::new_v4().to_string(),
@@ -163,6 +167,7 @@ fn build_connect_request(identity: &NodeIdentityFile, nonce: String) -> serde_js
             "device": device,
             "caps": caps,
             "commands": commands,
+            "auth": auth,
         }
     })
 }
