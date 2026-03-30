@@ -4813,6 +4813,8 @@ fn collect_configured_channels(
                 wc.listen_path.clone(),
                 wc.callback_url.clone(),
                 wc.callback_auth_header.clone(),
+                config.gateway.require_pairing,
+                config.gateway.paired_tokens.clone(),
             )),
         });
     }

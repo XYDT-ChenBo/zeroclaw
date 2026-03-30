@@ -15,6 +15,7 @@ use super::node_registry::OutgoingMessage;
 use crate::gateway::AppState;
 use crate::dt_nodes_registry::ConnectedNodeRegistry;
 use crate::dt_nodes_registry::NodeCommandResult;
+use crate::security::pairing::PairingGuard;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -74,29 +75,8 @@ pub async fn handle_ws_node(
     }
     let registry = ConnectedNodeRegistry::global();
 
-    // Optional token check: header X-Node-Control-Token
-    let config = state.config.lock().gateway.node_control.clone();
-    if let Some(expected) = config
-        .auth_token
-        .as_deref()
-        .filter(|s: &&str| !s.is_empty())
-    {
-        let provided = headers
-            .get("X-Node-Control-Token")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .unwrap_or("");
-        if !crate::security::pairing::constant_time_eq(expected, provided) {
-            tracing::warn!(
-                peer = %peer_addr,
-                "node websocket rejected: invalid X-Node-Control-Token"
-            );
-            return (StatusCode::UNAUTHORIZED, "Invalid X-Node-Control-Token").into_response();
-        }
-    }
-
     tracing::info!(peer = %peer_addr, "node websocket upgrade accepted");
-    ws.on_upgrade(move |socket| handle_node_socket(socket, registry, peer_addr))
+    ws.on_upgrade(move |socket| handle_node_socket(socket, registry, peer_addr, state.pairing))
         .into_response()
 }
 
@@ -104,6 +84,7 @@ async fn handle_node_socket(
     mut socket: WebSocket,
     registry: std::sync::Arc<super::node_registry::ConnectedNodeRegistry>,
     peer_addr: SocketAddr,
+    pairing: std::sync::Arc<PairingGuard>,
 ) {
     // ── Step 1: send connect.challenge ─────────────────────────────
     let nonce = Uuid::new_v4().to_string();
@@ -170,6 +151,40 @@ async fn handle_node_socket(
             .get("params")
             .cloned()
             .unwrap_or(serde_json::json!({}));
+
+        if pairing.require_pairing() {
+            let provided = params
+                .get("auth")
+                .and_then(|v| v.get("token"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if !pairing.is_authenticated(provided) {
+                tracing::warn!(
+                    params = %params,
+                    "node websocket connect rejected: invalid auth.token"
+                );
+                let connect_res = serde_json::json!({
+                    "type": "res",
+                    "id": connect_id,
+                    "ok": false,
+                    "error": {
+                        "code": "unauthorized",
+                        "message": "invalid auth.token",
+                    }
+                });
+                if let Err(error) = socket
+                    .send(Message::Text(connect_res.to_string().into()))
+                    .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to send auth rejection response to websocket client"
+                    );
+                }
+                return;
+            }
+        }
 
         // Role 分流：只接受 role = "node" 的连接，其它（例如 "operator"）直接拒绝。
         let role = params
