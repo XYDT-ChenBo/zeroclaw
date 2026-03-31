@@ -427,6 +427,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             extra_headers: config.extra_headers.clone(),
             api_path: config.api_path.clone(),
             provider_max_tokens: config.provider_max_tokens,
+            parallel_tool_calls: Some(config.agent.parallel_tools),
         },
     )?);
     let model = config
