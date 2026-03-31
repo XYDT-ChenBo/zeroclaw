@@ -49,6 +49,7 @@ pub struct OpenAiCompatibleProvider {
     api_path: Option<String>,
     /// Maximum output tokens to include in API requests.
     max_tokens: Option<u32>,
+    parallel_tool_calls: Option<bool>,
 }
 
 /// How the provider expects the API key to be sent.
@@ -187,6 +188,7 @@ impl OpenAiCompatibleProvider {
             reasoning_effort: None,
             api_path: None,
             max_tokens: None,
+            parallel_tool_calls: None,
         }
     }
 
@@ -221,6 +223,11 @@ impl OpenAiCompatibleProvider {
     /// When set, replaces the default `/chat/completions` path.
     pub fn with_api_path(mut self, api_path: Option<String>) -> Self {
         self.api_path = api_path;
+        self
+    }
+
+    pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
+        self.parallel_tool_calls = parallel_tool_calls;
         self
     }
 
@@ -413,6 +420,14 @@ impl OpenAiCompatibleProvider {
             .then(|| self.reasoning_effort.clone())
             .flatten()
     }
+
+    fn parallel_tool_calls_for_model(&self, model: &str) -> Option<bool> {
+        let id = model.rsplit('/').next().unwrap_or(model);
+        let supports_parallel_tool_calls = id.contains("doubao");
+        supports_parallel_tool_calls
+            .then(|| self.parallel_tool_calls.clone())
+            .flatten()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -432,6 +447,8 @@ struct ApiChatRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -635,6 +652,8 @@ struct NativeChatRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1651,6 +1670,7 @@ impl Provider for OpenAiCompatibleProvider {
             tools: None,
             tool_choice: None,
             max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -1776,6 +1796,7 @@ impl Provider for OpenAiCompatibleProvider {
             tools: None,
             tool_choice: None,
             max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -1897,6 +1918,7 @@ impl Provider for OpenAiCompatibleProvider {
                 Some("auto".to_string())
             },
             max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -2010,6 +2032,7 @@ impl Provider for OpenAiCompatibleProvider {
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -2163,6 +2186,7 @@ impl Provider for OpenAiCompatibleProvider {
                 tools: tools.clone(),
                 tool_choice: tools.as_ref().map(|_| "auto".to_string()),
                 max_tokens: self.max_tokens,
+                parallel_tool_calls: self.parallel_tool_calls_for_model(model),
             })
         } else {
             let messages = effective_messages
@@ -2187,6 +2211,7 @@ impl Provider for OpenAiCompatibleProvider {
                 tools: None,
                 tool_choice: None,
                 max_tokens: self.max_tokens,
+                parallel_tool_calls: self.parallel_tool_calls_for_model(model),
             })
         };
 
@@ -2294,6 +2319,7 @@ impl Provider for OpenAiCompatibleProvider {
             tools: None,
             tool_choice: None,
             max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -2405,6 +2431,7 @@ impl Provider for OpenAiCompatibleProvider {
             tools: None,
             tool_choice: None,
             max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();

@@ -16,6 +16,8 @@ pub fn build_channel_system_prompt(
 
     inject_safety_prompt(&mut prompt);
 
+    inject_tools_prompt(&mut prompt, config);
+
     inject_skills_prompt(&mut prompt, config);
 
     inject_workspace_prompt(&mut prompt, config);
@@ -37,6 +39,14 @@ pub fn build_channel_system_prompt(
     compact_system_prompt_if_needed(&mut prompt, config.agent.max_system_prompt_chars);
 
     prompt
+}
+
+
+fn inject_tools_prompt(prompt: &mut String, config: &Config){
+    if config.agent.parallel_tools {
+        prompt.push_str("## Tools \n\n");
+        prompt.push_str("Support parallel tool calls. When tools are independent with no dependencies, call them simultaneously in one response. Only call sequentially when there is a clear dependency.\n\n");
+    }
 }
 
 
@@ -115,7 +125,7 @@ fn inject_connected_nodes_prompt(prompt: &mut String, config: &Config){
         if nodes.is_empty() {
             prompt.push_str("- **No nodes connected.**\n\n");
         } else {
-            prompt.push_str("Currently connected nodes (`nodes status` result):\n");
+            prompt.push_str("Currently connected nodes (`nodes status` tool execute result, you don't need to execute it again):\n");
             for node in nodes {
                 let display_name = node
                     .meta
