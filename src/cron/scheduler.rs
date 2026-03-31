@@ -237,7 +237,10 @@ async fn run_agent_job(
     }
     let name = job.name.clone().unwrap_or_else(|| "cron-job".to_string());
     let prompt = job.prompt.clone().unwrap_or_default();
-    let prefixed_prompt = format!("[cron:{} {name}] {prompt}", job.id);
+    let prefixed_prompt = format!(
+        "[cron:{} {name}] 你是定时消息投递助手。请严格按以下格式输出，且只能输出这一个标签块，不得输出任何其他文字（包括思考、分析、解释、前后缀）：\n<final>给用户的最终内容</final>\n{}",
+        job.id, prompt
+    );
     let model_override = job.model.clone();
 
     let run_result = match job.session_target {
@@ -249,7 +252,7 @@ async fn run_agent_job(
                 model_override,
                 config.default_temperature,
                 vec![],
-                false,
+                true,
                 None,
                 job.allowed_tools.clone(),
             ))
@@ -258,16 +261,38 @@ async fn run_agent_job(
     };
 
     match run_result {
-        Ok(response) => (
-            true,
-            if response.trim().is_empty() {
-                "agent job executed".to_string()
-            } else {
-                response
-            },
-        ),
+        Ok(response) => {
+            let concise = extract_final_output(&response);
+            (
+                true,
+                if concise.trim().is_empty() {
+                    "agent job executed".to_string()
+                } else {
+                    concise
+                },
+            )
+        }
         Err(e) => (false, format!("agent job failed: {e}")),
     }
+}
+
+fn extract_final_output(response: &str) -> String {
+    let text = response.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    const OPEN: &str = "<final>";
+    const CLOSE: &str = "</final>";
+    if let Some(start) = text.rfind(OPEN) {
+        let tail = &text[start + OPEN.len()..];
+        if let Some(end) = tail.find(CLOSE) {
+            let candidate = tail[..end].trim();
+            if !candidate.is_empty() {
+                return candidate.to_string();
+            }
+        }
+    }
+    text.to_string()
 }
 
 async fn persist_job_result(

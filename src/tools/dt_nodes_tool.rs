@@ -506,8 +506,11 @@ impl Tool for NodesTool {
                     "description": "invoke action command name"
                 },
                 "invokeParamsJson": {
-                    "type": "string",
-                    "description": "invoke action JSON params string"
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "object" }
+                    ],
+                    "description": "invoke action params; accepts JSON string or object"
                 },
                 "path": {
                     "type": "string",
@@ -720,14 +723,26 @@ impl Tool for NodesTool {
             "invoke" => {
                 let node_id = self.resolve_node(&args)?;
                 let invoke_command = Self::read_required_string(&args, "invokeCommand")?;
-                let invoke_params = if let Some(raw_json) =
-                    Self::read_optional_nonempty_string(&args, "invokeParamsJson")
-                {
-                    serde_json::from_str::<Value>(raw_json).map_err(|error| {
-                        anyhow::anyhow!("invokeParamsJson must be valid JSON: {error}")
-                    })?
-                } else {
-                    serde_json::json!({})
+                let invoke_params = match args.get("invokeParamsJson") {
+                    None | Some(Value::Null) => serde_json::json!({}),
+                    Some(Value::Object(map)) => Value::Object(map.clone()),
+                    Some(Value::String(raw_json)) => {
+                        let raw_json = raw_json.trim();
+                        if raw_json.is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::from_str::<Value>(raw_json).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invokeParamsJson string must be valid JSON: {error}"
+                                )
+                            })?
+                        }
+                    }
+                    Some(other) => {
+                        return Err(anyhow::anyhow!(
+                            "invokeParamsJson must be a JSON string or object, got {other}"
+                        ));
+                    }
                 };
                 self.execute_invoke_action(&node_id, &invoke_command, invoke_params)
                     .await

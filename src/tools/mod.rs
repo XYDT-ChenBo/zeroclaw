@@ -15,14 +15,15 @@
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
+pub mod a2a_client;
 pub mod ask_user;
 pub mod backup_tool;
-pub mod a2a_client;
 pub mod browser;
 pub mod browser_delegate;
 pub mod browser_open;
 pub mod calculator;
 pub mod canvas;
+pub mod channel_send;
 pub mod claude_code;
 pub mod claude_code_runner;
 pub mod cli_discovery;
@@ -40,7 +41,7 @@ pub mod cron_update;
 pub mod data_management;
 pub mod delegate;
 pub mod discord_search;
-pub mod channel_send;
+pub mod dt_nodes_tool;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -78,7 +79,6 @@ pub mod node_capabilities;
 pub mod node_tool;
 pub mod notion_tool;
 pub mod opencode_cli;
-pub mod dt_nodes_tool;
 pub mod pdf_read;
 pub mod poll;
 pub mod project_intel;
@@ -111,9 +111,9 @@ mod web_search_provider_routing;
 pub mod web_search_tool;
 pub mod workspace_tool;
 
+pub use a2a_client::A2aClientTool;
 pub use ask_user::AskUserTool;
 pub use backup_tool::BackupTool;
-pub use a2a_client::A2aClientTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 #[allow(unused_imports)]
 pub use browser_delegate::{BrowserDelegateConfig, BrowserDelegateTool};
@@ -136,9 +136,11 @@ pub use cron_update::CronUpdateTool;
 pub use data_management::DataManagementTool;
 pub use delegate::DelegateTool;
 // Re-exported for downstream consumers of background delegation results.
+pub use channel_send::ChannelSendTool;
 #[allow(unused_imports)]
 pub use delegate::{BackgroundDelegateResult, BackgroundTaskStatus};
 pub use discord_search::DiscordSearchTool;
+pub use dt_nodes_tool::NodesTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
@@ -173,7 +175,6 @@ pub use model_switch::ModelSwitchTool;
 pub use node_tool::NodeTool;
 pub use notion_tool::NotionTool;
 pub use opencode_cli::OpenCodeCliTool;
-pub use dt_nodes_tool::NodesTool;
 pub use pdf_read::PdfReadTool;
 pub use poll::{ChannelMapHandle, PollTool};
 pub use project_intel::ProjectIntelTool;
@@ -181,7 +182,6 @@ pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
 pub use reaction::ReactionTool;
 pub use read_skill::ReadSkillTool;
-pub use channel_send::ChannelSendTool;
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
@@ -211,10 +211,10 @@ pub use web_search_tool::WebSearchTool;
 pub use workspace_tool::WorkspaceTool;
 
 use crate::config::{Config, DelegateAgentConfig};
+use crate::dt_nodes_registry::ConnectedNodeRegistry;
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::{create_sandbox, SecurityPolicy};
-use crate::dt_nodes_registry::ConnectedNodeRegistry;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -439,12 +439,8 @@ pub fn all_tools_with_runtime(
             workspace_dir.to_path_buf(),
         )),
         Arc::new(CalculatorTool::new()),
-        Arc::new(WeatherTool::new()),
         Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
-        Arc::new(ChannelSendTool::new(
-            config.clone(),
-            security.clone(),
-        )),
+        Arc::new(ChannelSendTool::new(config.clone(), security.clone())),
     ];
 
     // Register discord_search if discord_history channel is configured
@@ -500,7 +496,8 @@ pub fn all_tools_with_runtime(
         tool_arcs.push(Arc::new(ReadSkillTool::new(
             workspace_dir.to_path_buf(),
             root_config.skills.open_skills_enabled,
-            root_config.skills.open_skills_dir.clone())));
+            root_config.skills.open_skills_dir.clone(),
+        )));
     }
 
     if config.gateway.node_control.enabled {
