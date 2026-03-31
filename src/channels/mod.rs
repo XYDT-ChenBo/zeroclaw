@@ -14,6 +14,7 @@
 //! To add a new channel, implement [`Channel`] in a new submodule and wire it into
 //! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
 
+pub mod build_system_prompt_helper;
 pub mod acp_server;
 pub mod bluesky;
 pub mod clawdtalk;
@@ -2582,8 +2583,11 @@ async fn process_channel_message(
     } else {
         refreshed_new_session_system_prompt(ctx.as_ref())
     };
-    let mut system_prompt =
-        build_channel_system_prompt(&base_system_prompt, &msg.channel, &msg.reply_target);
+    let mut system_prompt =crate::channels::build_system_prompt_helper::build_channel_system_prompt(
+        &ctx.prompt_config,
+        &msg.channel,
+        &msg.reply_target,
+    );
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
     }

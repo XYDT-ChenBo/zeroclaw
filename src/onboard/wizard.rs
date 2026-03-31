@@ -5810,7 +5810,7 @@ From fetched Agent Card JSON, extract and summarize clearly:
 
 **Do NOT confuse these two.** `agent_url` is for sending messages. `agentCardUrl` is for discovery.
 
-## Step 4: Update TOOLS.md Using Multi-Peer Template (Mandatory, never skip)
+## Step 4: Update A2A.md Using Multi-Peer Template (Mandatory, never skip)
 
 **This step is mandatory.** Always write or append an A2A section into the agent's `TOOLS.md` after capability discovery.
 
@@ -5830,16 +5830,16 @@ Confirm all of the following in the final response:
 1. `agent_url` and token were received
 2. Agent Card URL was auto-discovered and fetched successfully
 3. Capabilities + skills/tools + auth were extracted
-4. `TOOLS.md` was written/updated from template
+4. `A2A.md` was written/updated from template
 5. Peer is ready for invocation via `a2a_client`
 
 If any item failed, explicitly mark it as failed and explain next action.
 ";
 
     let a2a_tools_md_template = "
-# TOOLS.md A2A Section Template
+# A2A.md A2A Section Template
 
-Append this section to the agent's `TOOLS.md` file, replacing all `<PLACEHOLDERS>` with actual values.
+Append this section to the agent's `A2A.md` file, replacing all `<PLACEHOLDERS>` with actual values.
 
 ---
 
