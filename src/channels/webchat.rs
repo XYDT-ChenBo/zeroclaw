@@ -238,11 +238,11 @@ impl Channel for WebchatChannel {
     }
 
 
-    async fn update_draft(&self, recipient: &str, _message_id: &str, text: &str) -> Result<()> {
-        // update draft 会返回思考的信息，如果需要再实现
-        let _ = text;
-        Ok(())
-    }
+    // async fn update_draft(&self, recipient: &str, _message_id: &str, text: &str) -> Result<()> {
+    //     // update draft 会返回思考的信息，如果需要再实现
+    //     let _ = text;
+    //     Ok(())
+    // }
 
     async fn update_draft_progress(&self, recipient: &str, _message_id: &str, text: &str) -> Result<()> {
         let dispatch = {

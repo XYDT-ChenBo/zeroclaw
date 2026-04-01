@@ -3558,80 +3558,17 @@ pub async fn run(
         );
     }
 
-    // ── Wire MCP tools (non-fatal) — CLI path ────────────────────
-    // NOTE: MCP tools are injected after built-in tool filtering
-    // (filter_primary_agent_tools_or_fail / agent.allowed_tools / agent.denied_tools).
-    // MCP servers are user-declared external integrations; the built-in allow/deny
-    // filter is not appropriate for them and would silently drop all MCP tools when
-    // a restrictive allowlist is configured. Keep this block after any such filter call.
-    //
-    // When `deferred_loading` is enabled, MCP tools are NOT added to the registry
-    // eagerly. Instead, a `tool_search` built-in is registered so the LLM can
-    // fetch schemas on demand. This reduces context window waste.
-    let mut deferred_section = String::new();
-    let mut activated_handle: Option<
-        std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>,
-    > = None;
-    if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                if config.mcp.deferred_loading {
-                    // Deferred path: build stubs and register tool_search
-                    let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
-                        std::sync::Arc::clone(&registry),
-                    )
-                    .await;
-                    tracing::info!(
-                        "MCP deferred: {} tool stub(s) from {} server(s)",
-                        deferred_set.len(),
-                        registry.server_count()
-                    );
-                    deferred_section =
-                        crate::tools::mcp_deferred::build_deferred_tools_section(&deferred_set);
-                    let activated = std::sync::Arc::new(std::sync::Mutex::new(
-                        crate::tools::ActivatedToolSet::new(),
-                    ));
-                    activated_handle = Some(std::sync::Arc::clone(&activated));
-                    tools_registry.push(Box::new(crate::tools::ToolSearchTool::new(
-                        deferred_set,
-                        activated,
-                    )));
-                } else {
-                    // Eager path: register all MCP tools directly
-                    let names = registry.tool_names();
-                    let mut registered = 0usize;
-                    for name in names {
-                        if let Some(def) = registry.get_tool_def(&name).await {
-                            let wrapper: std::sync::Arc<dyn Tool> =
-                                std::sync::Arc::new(crate::tools::McpToolWrapper::new(
-                                    name,
-                                    def,
-                                    std::sync::Arc::clone(&registry),
-                                ));
-                            if let Some(ref handle) = delegate_handle {
-                                handle.write().push(std::sync::Arc::clone(&wrapper));
-                            }
-                            tools_registry.push(Box::new(crate::tools::ArcToolRef(wrapper)));
-                            registered += 1;
-                        }
-                    }
-                    tracing::info!(
-                        "MCP: {} tool(s) registered from {} server(s)",
-                        registered,
-                        registry.server_count()
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!("MCP registry failed to initialize: {e:#}");
-            }
-        }
-    }
+    // ── Wire MCP + optional native deferred tools + `tool_search` (non-fatal) ──
+    // Same ordering as before: after allowlist filtering. See `deferred_wire`.
+    let deferred_wire_out =
+        crate::tools::deferred_wire::wire_deferred_tool_surfaces(
+            &config,
+            &mut tools_registry,
+            delegate_handle.as_ref(),
+        )
+        .await;
+    let deferred_section = deferred_wire_out.deferred_prompt_section;
+    let activated_handle = deferred_wire_out.activated_tools;
 
     // ── Resolve provider ─────────────────────────────────────────
     let mut provider_name = provider_override
@@ -4524,72 +4461,15 @@ pub async fn process_message(
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
 
-    // ── Wire MCP tools (non-fatal) — process_message path ────────
-    // NOTE: Same ordering contract as the CLI path above — MCP tools must be
-    // injected after filter_primary_agent_tools_or_fail (or equivalent built-in
-    // tool allow/deny filtering) to avoid MCP tools being silently dropped.
-    let mut deferred_section = String::new();
-    let mut activated_handle_pm: Option<
-        std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>,
-    > = None;
-    if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                if config.mcp.deferred_loading {
-                    let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
-                        std::sync::Arc::clone(&registry),
-                    )
-                    .await;
-                    tracing::info!(
-                        "MCP deferred: {} tool stub(s) from {} server(s)",
-                        deferred_set.len(),
-                        registry.server_count()
-                    );
-                    deferred_section =
-                        crate::tools::mcp_deferred::build_deferred_tools_section(&deferred_set);
-                    let activated = std::sync::Arc::new(std::sync::Mutex::new(
-                        crate::tools::ActivatedToolSet::new(),
-                    ));
-                    activated_handle_pm = Some(std::sync::Arc::clone(&activated));
-                    tools_registry.push(Box::new(crate::tools::ToolSearchTool::new(
-                        deferred_set,
-                        activated,
-                    )));
-                } else {
-                    let names = registry.tool_names();
-                    let mut registered = 0usize;
-                    for name in names {
-                        if let Some(def) = registry.get_tool_def(&name).await {
-                            let wrapper: std::sync::Arc<dyn Tool> =
-                                std::sync::Arc::new(crate::tools::McpToolWrapper::new(
-                                    name,
-                                    def,
-                                    std::sync::Arc::clone(&registry),
-                                ));
-                            if let Some(ref handle) = delegate_handle_pm {
-                                handle.write().push(std::sync::Arc::clone(&wrapper));
-                            }
-                            tools_registry.push(Box::new(crate::tools::ArcToolRef(wrapper)));
-                            registered += 1;
-                        }
-                    }
-                    tracing::info!(
-                        "MCP: {} tool(s) registered from {} server(s)",
-                        registered,
-                        registry.server_count()
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!("MCP registry failed to initialize: {e:#}");
-            }
-        }
-    }
+    let deferred_wire_pm =
+        crate::tools::deferred_wire::wire_deferred_tool_surfaces(
+            &config,
+            &mut tools_registry,
+            delegate_handle_pm.as_ref(),
+        )
+        .await;
+    let deferred_section = deferred_wire_pm.deferred_prompt_section;
+    let activated_handle_pm = deferred_wire_pm.activated_tools;
 
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
     let model_name = config
