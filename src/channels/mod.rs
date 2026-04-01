@@ -2584,6 +2584,7 @@ async fn process_channel_message(
         refreshed_new_session_system_prompt(ctx.as_ref())
     };
     let mut system_prompt =crate::channels::build_system_prompt_helper::build_channel_system_prompt(
+        &base_system_prompt,
         &ctx.prompt_config,
         &msg.channel,
         &msg.reply_target,
@@ -3516,7 +3517,7 @@ fn load_openclaw_bootstrap_files(
     }
 
     // MEMORY.md — curated long-term memory (main session only)
-    inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
+    // inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
 }
 
 /// Load workspace identity files and build a system prompt.
@@ -4985,72 +4986,15 @@ pub async fn start_channels(config: Config) -> Result<()> {
         None,
     );
 
-    // Wire MCP tools into the registry before freezing — non-fatal.
-    // When `deferred_loading` is enabled, MCP tools are NOT added eagerly.
-    // Instead, a `tool_search` built-in is registered for on-demand loading.
-    let mut deferred_section = String::new();
-    let mut ch_activated_handle: Option<
-        std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>,
-    > = None;
-    if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                if config.mcp.deferred_loading {
-                    let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
-                        std::sync::Arc::clone(&registry),
-                    )
-                    .await;
-                    tracing::info!(
-                        "MCP deferred: {} tool stub(s) from {} server(s)",
-                        deferred_set.len(),
-                        registry.server_count()
-                    );
-                    deferred_section =
-                        crate::tools::mcp_deferred::build_deferred_tools_section(&deferred_set);
-                    let activated = std::sync::Arc::new(std::sync::Mutex::new(
-                        crate::tools::ActivatedToolSet::new(),
-                    ));
-                    ch_activated_handle = Some(std::sync::Arc::clone(&activated));
-                    built_tools.push(Box::new(crate::tools::ToolSearchTool::new(
-                        deferred_set,
-                        activated,
-                    )));
-                } else {
-                    let names = registry.tool_names();
-                    let mut registered = 0usize;
-                    for name in names {
-                        if let Some(def) = registry.get_tool_def(&name).await {
-                            let wrapper: std::sync::Arc<dyn Tool> =
-                                std::sync::Arc::new(crate::tools::McpToolWrapper::new(
-                                    name,
-                                    def,
-                                    std::sync::Arc::clone(&registry),
-                                ));
-                            if let Some(ref handle) = delegate_handle_ch {
-                                handle.write().push(std::sync::Arc::clone(&wrapper));
-                            }
-                            built_tools.push(Box::new(crate::tools::ArcToolRef(wrapper)));
-                            registered += 1;
-                        }
-                    }
-                    tracing::info!(
-                        "MCP: {} tool(s) registered from {} server(s)",
-                        registered,
-                        registry.server_count()
-                    );
-                }
-            }
-            Err(e) => {
-                // Non-fatal — daemon continues with the tools registered above.
-                tracing::error!("MCP registry failed to initialize: {e:#}");
-            }
-        }
-    }
+    let deferred_wire_ch =
+        crate::tools::deferred_wire::wire_deferred_tool_surfaces(
+            &config,
+            &mut built_tools,
+            delegate_handle_ch.as_ref(),
+        )
+        .await;
+    let deferred_section = deferred_wire_ch.deferred_prompt_section;
+    let ch_activated_handle = deferred_wire_ch.activated_tools;
 
     let tools_registry = Arc::new(built_tools);
 

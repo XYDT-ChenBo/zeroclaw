@@ -1352,6 +1352,18 @@ pub struct AgentConfig {
     #[serde(default)]
     pub context_aware_tools: bool,
 
+    /// When true, built-in tools whose names are not in the active-list (see
+    /// [`Self::native_active_tools`] and defaults) are removed from the initial registry;
+    /// use `tool_search` to load their full schemas into the session.
+    #[serde(default)]
+    pub native_deferred_loading_enabled: bool,
+
+    /// Extra built-in tool names to keep active by default when
+    /// `native_deferred_loading_enabled` is enabled. Merged with an internal default set
+    /// (shell, file_read, glob_search, content_search, ask_user).
+    #[serde(default)]
+    pub native_active_tools: Vec<String>,
+
     /// Post-response quality evaluator configuration.
     #[serde(default)]
     pub eval: crate::agent::eval::EvalConfig,
@@ -1410,6 +1422,8 @@ impl Default for AgentConfig {
             thinking: crate::agent::thinking::ThinkingConfig::default(),
             history_pruning: crate::agent::history_pruner::HistoryPrunerConfig::default(),
             context_aware_tools: false,
+            native_deferred_loading_enabled: false,
+            native_active_tools: Vec::new(),
             eval: crate::agent::eval::EvalConfig::default(),
             auto_classify: None,
             context_compression:

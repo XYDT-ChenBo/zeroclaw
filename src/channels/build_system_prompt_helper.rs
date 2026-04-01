@@ -5,6 +5,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 pub fn build_channel_system_prompt(
+    base_prompt: &str,
     config: &Config,
     channel_name: &str,
     reply_target: &str,
@@ -16,7 +17,7 @@ pub fn build_channel_system_prompt(
 
     inject_safety_prompt(&mut prompt);
 
-    inject_tools_prompt(&mut prompt, config);
+    inject_tools_prompt(&mut prompt, config, base_prompt);
 
     inject_skills_prompt(&mut prompt, config);
 
@@ -42,10 +43,23 @@ pub fn build_channel_system_prompt(
 }
 
 
-fn inject_tools_prompt(prompt: &mut String, config: &Config){
+fn inject_tools_prompt(prompt: &mut String, config: &Config, base_prompt: &str) {
     if config.agent.parallel_tools {
         prompt.push_str("## Tools \n\n");
         prompt.push_str("Support parallel tool calls. When tools are independent with no dependencies, call them simultaneously in one response. Only call sequentially when there is a clear dependency.\n\n");
+    }
+    if config.agent.native_deferred_loading_enabled  {
+        if let Some(start) = base_prompt.find("## Deferred Tools\n\n") {
+            let after_start = &base_prompt[start..];
+            if let Some(end) = after_start.find("</available-deferred-tools>\n") {
+                let end = end + "</available-deferred-tools>\n".len();
+                let deferred_tools_section = &after_start[..end];
+                if !deferred_tools_section.trim().is_empty() {
+                    prompt.push_str(deferred_tools_section);
+                    prompt.push_str("\n\n");
+                }
+            }
+        }
     }
 }
 
