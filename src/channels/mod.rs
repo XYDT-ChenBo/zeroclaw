@@ -15,9 +15,9 @@
 //! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
 
 pub mod bluesky;
+pub mod bot_service;
 pub mod clawdtalk;
 pub mod cli;
-pub mod bot_service;
 pub mod dingtalk;
 pub mod discord;
 pub mod discord_history;
@@ -53,8 +53,8 @@ pub mod twitter;
 #[cfg(feature = "voice-wake")]
 pub mod voice_wake;
 pub mod wati;
-pub mod webhook;
 pub mod webchat;
+pub mod webhook;
 pub mod wecom;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
@@ -63,9 +63,9 @@ pub mod whatsapp_storage;
 pub mod whatsapp_web;
 
 pub use bluesky::BlueskyChannel;
+pub use bot_service::BotServiceChannel;
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
-pub use bot_service::BotServiceChannel;
 pub use dingtalk::DingTalkChannel;
 pub use discord::DiscordChannel;
 pub use discord_history::DiscordHistoryChannel;
@@ -96,8 +96,8 @@ pub use twitter::TwitterChannel;
 #[cfg(feature = "voice-wake")]
 pub use voice_wake::VoiceWakeChannel;
 pub use wati::WatiChannel;
-pub use webhook::WebhookChannel;
 pub use webchat::WebchatChannel;
+pub use webhook::WebhookChannel;
 pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
@@ -5168,7 +5168,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5229,7 +5228,10 @@ mod tests {
 
         let rendered = render_channel_error(&err);
         assert!(rendered.contains("⚠️ 模型调用失败"));
-        assert!(!rendered.contains(r#"{"code": 9999"#), "should not leak raw JSON: {rendered}");
+        assert!(
+            !rendered.contains(r#"{"code": 9999"#),
+            "should not leak raw JSON: {rendered}"
+        );
     }
 
     #[test]

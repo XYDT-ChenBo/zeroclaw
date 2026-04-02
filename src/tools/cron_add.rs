@@ -365,7 +365,7 @@ impl Tool for CronAddTool {
 
                 // Agent jobs default to app_display delivery when HTTP delivery is configured.
                 // This also overrides any non-app_display delivery to ensure consistent UX.
-                let delivery = self.default_agent_delivery_app_display(delivery);
+                // let delivery = self.default_agent_delivery_app_display(delivery);
 
                 cron::add_agent_job(
                     &self.config,

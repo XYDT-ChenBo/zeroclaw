@@ -3462,12 +3462,12 @@ pub(crate) async fn run_tool_call_loop(
                 }
             }
 
-            maybe_inject_channel_delivery_defaults(
-                &tool_name,
-                &mut tool_args,
-                channel_name,
-                channel_reply_target,
-            );
+            // maybe_inject_channel_delivery_defaults(
+            //     &tool_name,
+            //     &mut tool_args,
+            //     channel_name,
+            //     channel_reply_target,
+            // );
 
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
@@ -4767,7 +4767,7 @@ pub async fn process_message(
     config: Config,
     message: &str,
     extra_tools: Option<Vec<Box<dyn Tool>>>,
-    session_id: Option<&str>
+    session_id: Option<&str>,
 ) -> Result<String> {
     process_message_with_stream(config, message, session_id, extra_tools, None).await
 }
@@ -4781,7 +4781,7 @@ pub async fn process_message_with_stream(
     message: &str,
     session_id: Option<&str>,
     extra_tools: Option<Vec<Box<dyn Tool>>>,
-    on_delta: Option<tokio::sync::mpsc::Sender<String>>
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
@@ -5117,7 +5117,6 @@ pub async fn process_message_with_stream(
         excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
     }
 
-
     let result = agent_turn(
         provider.as_ref(),
         &mut history,
@@ -5146,7 +5145,7 @@ pub async fn process_message_with_stream(
         provider.as_ref(),
         &model_name,
         config.agent.max_history_messages,
-        config.agent.max_context_tokens
+        config.agent.max_context_tokens,
     )
     .await
     {
@@ -6483,69 +6482,6 @@ mod tests {
         assert!(
             idx_a < idx_b,
             "tool results should preserve input order for tool call mapping"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_tool_call_loop_injects_channel_delivery_defaults_for_cron_add() {
-        let provider = ScriptedProvider::from_text_responses(vec![
-            r#"<tool_call>
-{"name":"cron_add","arguments":{"job_type":"agent","prompt":"remind me later","schedule":{"kind":"every","every_ms":60000}}}
-</tool_call>"#,
-            "done",
-        ]);
-
-        let recorded_args = Arc::new(Mutex::new(Vec::new()));
-        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(RecordingArgsTool::new(
-            "cron_add",
-            Arc::clone(&recorded_args),
-        ))];
-
-        let mut history = vec![
-            ChatMessage::system("test-system"),
-            ChatMessage::user("schedule a reminder"),
-        ];
-        let observer = NoopObserver;
-
-        let result = run_tool_call_loop(
-            &provider,
-            &mut history,
-            &tools_registry,
-            &observer,
-            "mock-provider",
-            "mock-model",
-            0.0,
-            true,
-            None,
-            "telegram",
-            Some("chat-42"),
-            &crate::config::MultimodalConfig::default(),
-            4,
-            None,
-            None,
-            None,
-            &[],
-            &[],
-            None,
-            None,
-            &crate::config::PacingConfig::default(),
-        )
-        .await
-        .expect("cron_add delivery defaults should be injected");
-
-        assert_eq!(result, "done");
-
-        let recorded = recorded_args
-            .lock()
-            .expect("recorded args lock should be valid");
-        let delivery = recorded[0]["delivery"].clone();
-        assert_eq!(
-            delivery,
-            serde_json::json!({
-                "mode": "announce",
-                "channel": "telegram",
-                "to": "chat-42",
-            })
         );
     }
 

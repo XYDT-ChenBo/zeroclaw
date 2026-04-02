@@ -5756,6 +5756,12 @@ pub struct CronConfig {
     /// Maximum number of historical cron run records to retain. Default: `50`.
     #[serde(default = "default_max_run_history")]
     pub max_run_history: u32,
+    /// Optional prompt prefix injected before each cron agent job's prompt.
+    ///
+    /// - Empty/whitespace: uses the built-in default prefix (backward compatible).
+    /// - Non-empty: uses this value as the prefix (no validation enforced).
+    #[serde(default)]
+    pub agent_prompt_prefix: String,
     /// Declarative cron job definitions (`[[cron.jobs]]`).
     ///
     /// Jobs declared here are synced into the database at scheduler startup.
@@ -5854,6 +5860,7 @@ impl Default for CronConfig {
             enabled: true,
             catch_up_on_startup: true,
             max_run_history: default_max_run_history(),
+            agent_prompt_prefix: String::new(),
             jobs: Vec::new(),
         }
     }
@@ -11046,6 +11053,7 @@ recipient = "42"
             enabled: false,
             catch_up_on_startup: false,
             max_run_history: 100,
+            agent_prompt_prefix: String::new(),
             jobs: Vec::new(),
         };
         let json = serde_json::to_string(&c).unwrap();
@@ -11161,6 +11169,7 @@ default_temperature = 0.7
                 ..HeartbeatConfig::default()
             },
             cron: CronConfig::default(),
+            cron_http_delivery: CronHttpDeliveryConfig::default(),
             channels_config: ChannelsConfig {
                 bot_service: None,
                 cli: true,
@@ -11734,6 +11743,7 @@ default_temperature = 0.7
             query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig::default(),
             cron: CronConfig::default(),
+            cron_http_delivery: CronHttpDeliveryConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -15400,4 +15410,3 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
         }
     }
 }
-

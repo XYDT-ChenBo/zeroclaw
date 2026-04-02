@@ -237,10 +237,20 @@ async fn run_agent_job(
     }
     let name = job.name.clone().unwrap_or_else(|| "cron-job".to_string());
     let prompt = job.prompt.clone().unwrap_or_default();
-    let prefixed_prompt = format!(
-        "[cron:{} {name}] 你是定时消息投递助手。请严格按以下格式输出，且只能输出这一个标签块，不得输出任何其他文字（包括思考、分析、解释、前后缀）：\n<final>给用户的最终内容</final>\n{}",
-        job.id, prompt
-    );
+    let configured_prefix = config.cron.agent_prompt_prefix.trim();
+    let default_prefix =
+        "你是定时消息投递助手。请严格按以下格式输出，且只能输出这一个标签块，不得输出任何其他文字（包括思考、分析、解释、前后缀）：\n<final>给用户的最终内容</final>";
+    let final_only_constraint =
+        "输出只需 <final>给用户的最终内容</final>（除该标签块外不要输出任何文字）。";
+
+    // Always enforce the <final> output constraint, even when a custom prefix is configured.
+    let prefix = if configured_prefix.is_empty() {
+        format!("{default_prefix}\n{final_only_constraint}")
+    } else {
+        format!("{configured_prefix}\n{final_only_constraint}")
+    };
+
+    let prefixed_prompt = format!("[cron:{} {name}] {prefix}\n{prompt}", job.id);
     let model_override = job.model.clone();
 
     let run_result = match job.session_target {
@@ -659,10 +669,9 @@ pub(crate) async fn deliver_announcement_with_context(
                 .send(&SendMessage::new(safe_output.as_str(), target))
                 .await?;
         }
-        "http" | "app_display" => {
-            deliver_http(config, job, target, output, started_at).await?;
-        }
-
+        // "http" | "app_display" => {
+        //     deliver_http(config, job, target, output, started_at).await?;
+        // }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
 
