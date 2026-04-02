@@ -1,8 +1,14 @@
 use crate::dt_nodes::handlers::{camera_snap, file_save, system_run, Handler, InvokeOutcome};
+use crate::dt_nodes::node_runtime_trace::NodeTraceCtx;
 
-pub async fn handle_invoke(command: &str, params_json: &str) -> InvokeOutcome {
-    match command {
-        "system.run" => system_run::handle_system_run(params_json).await,
+pub async fn handle_invoke(
+    command: &str,
+    params_json: &str,
+    trace: Option<&NodeTraceCtx<'_>>,
+) -> InvokeOutcome {
+    tracing::info!(command, "dt_nodes: invoke started");
+    let outcome = match command {
+        "system.run" => system_run::handle_system_run(params_json, trace).await,
         "media.saveImage" => file_save::FileSaveHandler::new().handle(params_json),
         "camera.snap" => camera_snap::CameraSnapHandler::new().handle(params_json),
         other => InvokeOutcome {
@@ -13,6 +19,13 @@ pub async fn handle_invoke(command: &str, params_json: &str) -> InvokeOutcome {
                 "message": format!("command '{other}' is not implemented on zeroclaw node"),
             })),
         },
-    }
+    };
+    tracing::info!(
+        command,
+        ok = outcome.ok,
+        has_error = outcome.error.is_some(),
+        "dt_nodes: invoke finished"
+    );
+    outcome
 }
 
