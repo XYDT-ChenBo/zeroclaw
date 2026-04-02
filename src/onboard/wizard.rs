@@ -5918,7 +5918,7 @@ async fn scaffold_workspace(
          (Track unfinished tasks and follow-ups here)\n";
 
     let a2a_setup_skill = "\
-configure the ZeroClaw A2A Gateway for cross-server agent communication. Use whenever the user wants to connect one or more peer agents and can provide `agent_url` plus token/auth info. Always execute: (1) collect `agent_url` + token, (2) deterministically build Agent Card URL (no inference), (3) fetch and parse capabilities/auth details, (4) write/update `TOOLS.md` with multi-peer profile, (5) return verification checklist.
+configure the ZeroClaw A2A Gateway for cross-server agent communication. Use whenever the user wants to connect one or more peer agents and can provide `agent_url` plus token/auth info. Always execute: (1) collect `agent_url` + token, (2) deterministically build Agent Card URL (no inference), (3) fetch and parse capabilities/auth details, (4) write/update `A2A.md` with multi-peer profile, (5) return verification checklist.
 
 # A2A Gateway Setup
 
@@ -5992,7 +5992,7 @@ From fetched Agent Card JSON, extract and summarize clearly:
 
 ## Step 4: Update A2A.md Using Multi-Peer Template (Mandatory, never skip)
 
-**This step is mandatory.** Always write or append an A2A section into the agent's `TOOLS.md` after capability discovery.
+**This step is mandatory.** Always write or append an A2A section into the agent's `A2A.md` after capability discovery.
 
 Requirements (single or multiple peers):
 - Record user-provided `agent_url`
