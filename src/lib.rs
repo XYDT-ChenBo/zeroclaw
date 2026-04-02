@@ -68,6 +68,7 @@ pub mod peripherals;
 pub mod providers;
 pub mod dt_nodes_registry;
 pub mod rag;
+pub mod retrieval;
 pub mod routines;
 pub mod runtime;
 pub(crate) mod security;

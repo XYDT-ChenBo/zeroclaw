@@ -102,6 +102,7 @@ mod peripherals;
 #[cfg(feature = "plugins-wasm")]
 mod plugins;
 mod providers;
+mod retrieval;
 mod runtime;
 mod security;
 mod service;

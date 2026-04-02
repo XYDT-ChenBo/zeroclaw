@@ -8733,6 +8733,26 @@ async fn resolve_runtime_config_dirs(
         let custom_config_dir = custom_config_dir.trim();
         if !custom_config_dir.is_empty() {
             let zeroclaw_dir = expand_tilde_path(custom_config_dir);
+
+            // Perf/automation-friendly override:
+            // When both ZEROCLAW_CONFIG_DIR and ZEROCLAW_WORKSPACE are set, treat CONFIG_DIR as
+            // the configuration root, but use WORKSPACE as the actual workspace directory.
+            //
+            // This allows benchmark harnesses to isolate config under out/<run_id>/config while
+            // still operating on the real source tree as the workspace (relative tool paths,
+            // runtime trace path, and state dirs resolve under workspace_dir).
+            if let Ok(custom_workspace) = std::env::var("ZEROCLAW_WORKSPACE") {
+                let custom_workspace = custom_workspace.trim();
+                if !custom_workspace.is_empty() {
+                    let workspace_dir = expand_tilde_path(custom_workspace);
+                    return Ok((
+                        zeroclaw_dir,
+                        workspace_dir,
+                        ConfigResolutionSource::EnvConfigDir,
+                    ));
+                }
+            }
+
             return Ok((
                 zeroclaw_dir.clone(),
                 zeroclaw_dir.join("workspace"),

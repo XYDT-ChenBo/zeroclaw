@@ -1,4 +1,5 @@
 use super::traits::{Tool, ToolResult};
+use crate::retrieval::index_manifest;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -8,6 +9,17 @@ use std::sync::{Arc, OnceLock};
 const MAX_RESULTS: usize = 1000;
 const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
 const TIMEOUT_SECS: u64 = 30;
+const ENV_RETRIEVAL_PATCH_ON_STALE: &str = "ZEROCLAW_RETRIEVAL_PATCH_ON_STALE";
+
+fn env_flag_enabled(key: &str) -> bool {
+    let Ok(v) = std::env::var(key) else {
+        return false;
+    };
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
 
 /// Search file contents by regex pattern within the workspace.
 ///
@@ -91,6 +103,25 @@ impl Tool for ContentSearchTool {
                     "type": "integer",
                     "description": "Maximum number of results to return. Defaults to 1000",
                     "default": 1000
+                },
+                "prefer_changed_paths": {
+                    "type": "boolean",
+                    "description": "When true and an index manifest is available, restrict search targets to changed paths (rg only).",
+                    "default": false
+                },
+                "index_manifest_path": {
+                    "type": "string",
+                    "description": "Relative path to the retrieval index manifest JSON. Defaults to 'state/retrieval-index.json'.",
+                    "default": "state/retrieval-index.json"
+                },
+                "expected_index_version": {
+                    "type": "integer",
+                    "description": "Optional expected index_version. If provided and differs from manifest, treat all manifest paths as stale candidates."
+                },
+                "changed_paths_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of changed paths to search when prefer_changed_paths=true. Defaults to 500.",
+                    "default": 500
                 }
             },
             "required": ["pattern"]
@@ -160,6 +191,32 @@ impl Tool for ContentSearchTool {
             .map(|v| v as usize)
             .unwrap_or(MAX_RESULTS)
             .min(MAX_RESULTS);
+
+        let prefer_changed_paths_arg = args.get("prefer_changed_paths").and_then(|v| v.as_bool());
+        // Auto strategy (C):
+        // - If caller explicitly sets prefer_changed_paths, always respect it.
+        // - Otherwise, allow a low-coupling global default via env var.
+        let prefer_changed_paths =
+            prefer_changed_paths_arg.unwrap_or_else(|| env_flag_enabled(ENV_RETRIEVAL_PATCH_ON_STALE));
+
+        let index_manifest_path = args
+            .get("index_manifest_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("state/retrieval-index.json")
+            .trim();
+
+        let expected_index_version = args
+            .get("expected_index_version")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+
+        #[allow(clippy::cast_possible_truncation)]
+        let changed_paths_limit = args
+            .get("changed_paths_limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(500)
+            .min(10_000);
 
         // --- Rate limit check ---
         if self.security.is_rate_limited() {
@@ -245,17 +302,89 @@ impl Tool for ContentSearchTool {
         }
 
         // --- Build and execute command ---
+        //
+        // When prefer_changed_paths=true, try to load a retrieval index manifest and restrict
+        // search targets to changed paths only (rg backend). This implements the "rg patch"
+        // strategy described in dev/perf/检索与索引优化方案.md §5.2, while keeping the
+        // rest of the codebase decoupled from index bookkeeping.
+        let mut patch_meta: Option<(usize, String)> = None; // (files_count, manifest_rel_path)
+
         let mut cmd = if self.has_rg {
-            build_rg_command(
-                pattern,
-                &resolved_canon,
-                output_mode,
-                include,
-                case_sensitive,
-                context_before,
-                context_after,
-                multiline,
-            )
+            if prefer_changed_paths {
+                let manifest_abs =
+                    index_manifest::IndexManifest::resolve_path(&self.security.workspace_dir, index_manifest_path);
+                let mut changed_files: Vec<std::path::PathBuf> = Vec::new();
+
+                if let Some(manifest) = index_manifest::IndexManifest::load(&manifest_abs) {
+                    let changed_rel = index_manifest::changed_paths(
+                        &self.security.workspace_dir,
+                        &manifest,
+                        expected_index_version,
+                        changed_paths_limit,
+                    );
+
+                    for rel in changed_rel {
+                        let rel: String = rel;
+                        // Only allow workspace-relative paths; reject traversal explicitly.
+                        if rel.contains("../") || rel.contains("..\\") || rel == ".." {
+                            continue;
+                        }
+                        if !self.security.is_path_allowed(&rel) {
+                            continue;
+                        }
+                        let abs = self.security.resolve_tool_path(&rel);
+                        // Canonicalize and ensure still under allowed roots (symlink escape defense)
+                        let Ok(canon) = std::fs::canonicalize(&abs) else {
+                            continue;
+                        };
+                        if !self.security.is_resolved_path_allowed(&canon) {
+                            continue;
+                        }
+                        if canon.is_file() {
+                            changed_files.push(canon);
+                        }
+                        if changed_files.len() >= changed_paths_limit.max(1) {
+                            break;
+                        }
+                    }
+                }
+
+                if !changed_files.is_empty() {
+                    patch_meta = Some((changed_files.len(), index_manifest_path.to_string()));
+                    build_rg_command_for_files(
+                        pattern,
+                        &changed_files,
+                        output_mode,
+                        include,
+                        case_sensitive,
+                        context_before,
+                        context_after,
+                        multiline,
+                    )
+                } else {
+                    build_rg_command(
+                        pattern,
+                        &resolved_canon,
+                        output_mode,
+                        include,
+                        case_sensitive,
+                        context_before,
+                        context_after,
+                        multiline,
+                    )
+                }
+            } else {
+                build_rg_command(
+                    pattern,
+                    &resolved_canon,
+                    output_mode,
+                    include,
+                    case_sensitive,
+                    context_before,
+                    context_after,
+                    multiline,
+                )
+            }
         } else {
             build_grep_command(
                 pattern,
@@ -327,13 +456,22 @@ impl Tool for ContentSearchTool {
         };
 
         // Truncate output if too large
-        let final_output = if formatted.len() > MAX_OUTPUT_BYTES {
+        let mut final_output = if formatted.len() > MAX_OUTPUT_BYTES {
             let mut truncated = truncate_utf8(&formatted, MAX_OUTPUT_BYTES).to_string();
             truncated.push_str("\n\n[Output truncated: exceeded 1 MB limit]");
             truncated
         } else {
             formatted
         };
+
+        if let Some((files_count, manifest)) = patch_meta {
+            // Emit a stable marker so perf harness can detect whether the patch path was exercised.
+            // Keep it short and machine-parsable.
+            let header = format!(
+                "[retrieval_patch] prefer_changed_paths=true files={files_count} manifest={manifest}\n"
+            );
+            final_output = format!("{header}{final_output}");
+        }
 
         Ok(ToolResult {
             success: true,
@@ -395,6 +533,64 @@ fn build_rg_command(
     cmd.arg("--");
     cmd.arg(pattern);
     cmd.arg(search_path);
+
+    cmd
+}
+
+fn build_rg_command_for_files(
+    pattern: &str,
+    files: &[std::path::PathBuf],
+    output_mode: &str,
+    include: Option<&str>,
+    case_sensitive: bool,
+    context_before: usize,
+    context_after: usize,
+    multiline: bool,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("rg");
+
+    // Use line-based output for structured parsing
+    cmd.arg("--no-heading");
+    cmd.arg("--line-number");
+    cmd.arg("--with-filename");
+
+    match output_mode {
+        "files_with_matches" => {
+            cmd.arg("--files-with-matches");
+        }
+        "count" => {
+            cmd.arg("--count");
+        }
+        _ => {
+            // content mode (default)
+            if context_before > 0 {
+                cmd.arg("-B").arg(context_before.to_string());
+            }
+            if context_after > 0 {
+                cmd.arg("-A").arg(context_after.to_string());
+            }
+        }
+    }
+
+    if !case_sensitive {
+        cmd.arg("-i");
+    }
+
+    if multiline {
+        cmd.arg("-U");
+        cmd.arg("--multiline-dotall");
+    }
+
+    if let Some(glob) = include {
+        cmd.arg("--glob").arg(glob);
+    }
+
+    // Separator to prevent pattern from being parsed as flag
+    cmd.arg("--");
+    cmd.arg(pattern);
+    for f in files {
+        cmd.arg(f);
+    }
 
     cmd
 }
