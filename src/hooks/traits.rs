@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 use crate::channels::traits::ChannelMessage;
-use crate::providers::traits::{ChatMessage, ChatResponse};
+use crate::providers::traits::{ChatMessage, ChatResponse, ToolCall};
 use crate::tools::traits::ToolResult;
 
 /// Result of a modifying hook — continue with (possibly modified) data, or cancel.
@@ -75,6 +75,15 @@ pub trait HookHandler: Send + Sync {
         content: String,
     ) -> HookResult<(String, String, String)> {
         HookResult::Continue((channel, recipient, content))
+    }
+
+    /// Modifying hook: invoked after LLM response, before tool call parsing.
+    async fn before_llm_output(
+        &self,
+        response_text: String,
+        tool_calls: Vec<ToolCall>,
+    ) -> HookResult<(String, Vec<ToolCall>)> {
+        HookResult::Continue((response_text, tool_calls))
     }
 }
 

@@ -1,7 +1,9 @@
 pub mod builtin;
+mod factory;
 mod runner;
 mod traits;
 
+pub use factory::build_hooks_runner;
 pub use runner::HookRunner;
 // HookHandler and HookResult are part of the crate's public hook API surface.
 // They may appear unused internally but are intentionally re-exported for

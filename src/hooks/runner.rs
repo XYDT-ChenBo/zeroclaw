@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 use tracing::info;
 
 use crate::channels::traits::ChannelMessage;
-use crate::providers::traits::{ChatMessage, ChatResponse};
+use crate::providers::traits::{ChatMessage, ChatResponse, ToolCall};
 use crate::tools::traits::ToolResult;
 
 use super::traits::{HookHandler, HookResult};
@@ -311,6 +311,39 @@ impl HookRunner {
             }
         }
         HookResult::Continue((channel, recipient, content))
+    }
+
+    pub async fn run_before_llm_output(
+        &self,
+        mut response_text: String,
+        mut tool_calls: Vec<ToolCall>,
+    ) -> HookResult<(String, Vec<ToolCall>)> {
+        for h in &self.handlers {
+            let hook_name = h.name();
+            match AssertUnwindSafe(h.before_llm_output(response_text.clone(), tool_calls.clone()))
+                .catch_unwind()
+                .await
+            {
+                Ok(HookResult::Continue((rt, tc))) => {
+                    response_text = rt;
+                    tool_calls = tc;
+                }
+                Ok(HookResult::Cancel(reason)) => {
+                    info!(
+                        hook = hook_name,
+                        reason, "before_llm_output cancelled by hook"
+                    );
+                    return HookResult::Cancel(reason);
+                }
+                Err(_) => {
+                    tracing::error!(
+                        hook = hook_name,
+                        "before_llm_output hook panicked; continuing with previous values"
+                    );
+                }
+            }
+        }
+        HookResult::Continue((response_text, tool_calls))
     }
 }
 

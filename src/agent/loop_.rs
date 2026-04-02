@@ -1,6 +1,7 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::Config;
 use crate::cost::types::BudgetCheck;
+use crate::hooks::HookResult;
 use crate::i18n::ToolDescriptions;
 use crate::memory::{self, decay, Memory, MemoryCategory};
 use crate::multimodal;
@@ -1994,7 +1995,6 @@ struct StreamedChatOutcome {
     forwarded_live_deltas: bool,
 }
 
-
 async fn consume_provider_streaming_response(
     provider: &dyn Provider,
     messages: &[ChatMessage],
@@ -2125,6 +2125,7 @@ pub(crate) async fn agent_turn(
     activated_tools: Option<&std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
     model_switch_callback: Option<ModelSwitchCallback>,
     on_delta: Option<tokio::sync::mpsc::Sender<DraftEvent>>,
+    hooks: Option<&crate::hooks::HookRunner>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -2142,7 +2143,7 @@ pub(crate) async fn agent_turn(
         max_tool_iterations,
         None,
         on_delta,
-        None,
+        hooks,
         excluded_tools,
         dedup_exempt_tools,
         activated_tools,
@@ -2496,6 +2497,22 @@ pub(crate) async fn run_tool_call_loop(
             hooks.fire_llm_input(history, model).await;
         }
 
+        // Run guardrail check on user input (modifying hook, can cancel)
+        if let Some(hooks) = hooks {
+            let result = hooks
+                .run_before_llm_call(history.clone(), model.to_string())
+                .await;
+            match result {
+                HookResult::Continue((modified_messages, _modified_model)) => {
+                    *history = modified_messages;
+                    // model 通常不变，但支持 hook 修改
+                }
+                HookResult::Cancel(reason) => {
+                    return Err(anyhow::anyhow!(reason));
+                }
+            }
+        }
+
         // Budget enforcement — block if limit exceeded (no-op when not scoped)
         if let Some(BudgetCheck::Exceeded {
             current_usd,
@@ -2675,13 +2692,30 @@ pub(crate) async fn run_tool_call_loop(
                     .as_ref()
                     .and_then(|usage| record_tool_loop_cost_usage(provider_name, model, usage));
 
-                let response_text = resp.text_or_empty().to_string();
+                let mut response_text = resp.text_or_empty().to_string();
+                let mut tool_calls = resp.tool_calls.clone();
+
+                // Run guardrail check on model output (modifying hook, can cancel)
+                if let Some(hooks) = hooks {
+                    match hooks
+                        .run_before_llm_output(response_text.clone(), tool_calls.clone())
+                        .await
+                    {
+                        HookResult::Continue((modified_text, modified_calls)) => {
+                            response_text = modified_text;
+                            tool_calls = modified_calls;
+                        }
+                        HookResult::Cancel(reason) => {
+                            return Err(anyhow::anyhow!(reason));
+                        }
+                    }
+                }
+
                 // First try native structured tool calls (OpenAI-format).
                 // Fall back to text-based parsing (XML tags, markdown blocks,
                 // GLM format) only if the provider returned no native calls —
                 // this ensures we support both native and prompt-guided models.
-                let mut calls: Vec<ParsedToolCall> = resp
-                    .tool_calls
+                let mut calls: Vec<ParsedToolCall> = tool_calls
                     .iter()
                     .map(|call| ParsedToolCall {
                         name: call.name.clone(),
@@ -2842,7 +2876,8 @@ pub(crate) async fn run_tool_call_loop(
                 let _ = tx
                     .send(DraftEvent::Progress(format!(
                         "\u{1f4ac} 我需要先调用 {} 个工具来获取更多信息 , (本次推理耗时 {} 秒)\n",
-                        tool_calls.len(),llm_secs
+                        tool_calls.len(),
+                        llm_secs
                     )))
                     .await;
             }
@@ -3054,7 +3089,8 @@ pub(crate) async fn run_tool_call_loop(
 
             let signature = {
                 let canonical_args = canonicalize_json_for_tool_signature(&tool_args);
-                let args_json = serde_json::to_string(&canonical_args).unwrap_or_else(|_| "{}".to_string());
+                let args_json =
+                    serde_json::to_string(&canonical_args).unwrap_or_else(|_| "{}".to_string());
                 (tool_name.trim().to_ascii_lowercase(), args_json)
             };
             let dedup_exempt = dedup_exempt_tools.iter().any(|e| e == &tool_name);
@@ -3118,7 +3154,9 @@ pub(crate) async fn run_tool_call_loop(
                 let hint = {
                     let raw = match tool_name.as_str() {
                         "shell" => tool_args.get("command").and_then(|v| v.as_str()),
-                        "file_read" | "file_write" => tool_args.get("path").and_then(|v| v.as_str()),
+                        "file_read" | "file_write" => {
+                            tool_args.get("path").and_then(|v| v.as_str())
+                        }
                         _ => tool_args
                             .get("action")
                             .and_then(|v| v.as_str())
@@ -3861,6 +3899,8 @@ pub async fn run(
         }
     });
 
+    let hooks_runner = crate::hooks::build_hooks_runner(&config).map(Box::new);
+
     // ── Execute ──────────────────────────────────────────────────
     let start = Instant::now();
 
@@ -3971,7 +4011,7 @@ pub async fn run(
                 config.agent.max_tool_iterations,
                 None,
                 None,
-                None,
+                hooks_runner.as_deref(),
                 &excluded_tools,
                 &config.agent.tool_call_dedup_exempt,
                 activated_handle.as_ref(),
@@ -4275,7 +4315,7 @@ pub async fn run(
                     config.agent.max_tool_iterations,
                     Some(cancel_token.clone()),
                     Some(delta_tx.clone()),
-                    None,
+                    hooks_runner.as_deref(),
                     &excluded_tools,
                     &config.agent.tool_call_dedup_exempt,
                     activated_handle.as_ref(),
@@ -4452,7 +4492,7 @@ pub async fn run(
 pub async fn process_message(
     config: Config,
     message: &str,
-    session_id: Option<&str>
+    session_id: Option<&str>,
 ) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
@@ -4771,6 +4811,7 @@ pub async fn process_message(
         excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
     }
 
+    let hooks = crate::hooks::build_hooks_runner(&config).map(Box::new);
 
     let result = agent_turn(
         provider.as_ref(),
@@ -4791,6 +4832,7 @@ pub async fn process_message(
         activated_handle_pm.as_ref(),
         None,
         None,
+        hooks.as_deref(),
     )
     .await?;
 
@@ -7316,6 +7358,7 @@ mod tests {
                 &[],
                 &[],
                 Some(&activated),
+                None,
                 None,
                 None,
             )

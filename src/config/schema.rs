@@ -5255,6 +5255,9 @@ pub struct BuiltinHooksConfig {
     /// that matches one of `tool_patterns`.
     #[serde(default)]
     pub webhook_audit: WebhookAuditConfig,
+    /// Configuration for the guardrail hook.
+    #[serde(default)]
+    pub guardrail: GuardrailConfig,
 }
 
 /// Configuration for the webhook-audit builtin hook.
@@ -5300,6 +5303,39 @@ impl Default for WebhookAuditConfig {
             max_args_bytes: default_max_args_bytes(),
         }
     }
+}
+
+/// Configuration for the guardrail builtin hook.
+///
+/// Performs security checks on user input (before LLM) and/or model output (after LLM)
+/// by calling an external HTTP API. Blocks the conversation if the check fails.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct GuardrailConfig {
+    /// Enable the guardrail hook. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Target URL for the security check API.
+    #[serde(default)]
+    pub url: String,
+    /// HTTP timeout in seconds. Default: `5`.
+    #[serde(default = "default_guardrail_timeout")]
+    pub timeout_secs: u64,
+    /// Tenant ID (required by the external API).
+    pub tenant_id: i64,
+    /// Robot code / application identifier (required by the external API).
+    pub robot_code: String,
+    /// Robot type (required by the external API).
+    pub robot_type: String,
+    /// Check user input before LLM call. Default: `true`.
+    #[serde(default = "default_true")]
+    pub check_user_input: bool,
+    /// Check model output after LLM call. Default: `false`.
+    #[serde(default = "default_false")]
+    pub check_model_output: bool,
+}
+
+fn default_guardrail_timeout() -> u64 {
+    5
 }
 
 // ── Autonomy / Security ──────────────────────────────────────────
