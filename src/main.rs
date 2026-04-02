@@ -592,6 +592,10 @@ Examples:
 
        /// Connect this machine as nodes to a ZeroClaw gateway
     Nodes {
+        /// Interactive setup: discover gateway via mDNS and prompt for token
+        #[arg(short = 'i', long = "interactive")]
+        interactive: bool,
+
         /// Initialize node identity/config only (no WebSocket connection)
         #[arg(long)]
         init: bool,
@@ -1701,6 +1705,7 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Nodes {
+            interactive,
             init,
             config: node_config_path,
             host,
@@ -1708,7 +1713,17 @@ async fn main() -> Result<()> {
             name,
             token,
         } => {
-            dt_nodes::run_node(&config, init, node_config_path, host, port, name, token).await
+            dt_nodes::run_node(
+                &config,
+                interactive,
+                init,
+                node_config_path,
+                host,
+                port,
+                name,
+                token,
+            )
+            .await
         }
     }
 }

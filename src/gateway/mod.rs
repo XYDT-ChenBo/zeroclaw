@@ -22,6 +22,7 @@ pub mod sse;
 pub mod static_files;
 pub mod tls;
 pub mod ws;
+pub mod mdns;
 
 use crate::dt_nodes_registry::handle_ws_node;
 use crate::channels::{
@@ -410,6 +411,24 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
+
+    // ── Optional mDNS advertisement (LAN discovery) ────────────────
+    if config.gateway.mdns.enabled && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+    {
+        tracing::warn!(
+            "gateway.mdns.enabled=true but gateway is bound to {host}; other LAN devices may not be able to connect. Consider binding to 0.0.0.0 or a LAN IP."
+        );
+    }
+    let path_prefix = config
+        .gateway
+        .path_prefix
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let _mdns_advertiser =
+        mdns::start_gateway_mdns(&config.gateway.mdns, actual_port, &path_prefix)
+            .context("start gateway mDNS advertisement")?;
 
     let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
         config.default_provider.as_deref().unwrap_or("openrouter"),

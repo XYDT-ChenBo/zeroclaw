@@ -2086,12 +2086,59 @@ pub struct GatewayConfig {
     /// TLS configuration for the gateway server (`[gateway.tls]`).
     #[serde(default)]
     pub tls: Option<GatewayTlsConfig>,
+    /// mDNS advertisement for local network discovery (`[gateway.mdns]`).
+    #[serde(default)]
+    pub mdns: GatewayMdnsConfig,
     /// Enable node control (WebSocket nodes + nodes tool)
     #[serde(default)]
     pub node_control: NodeControlConfig,
     /// Agent-to-Agent integration switches (`[gateway.a2a]` section).
     #[serde(default)]
     pub a2a: A2aConfig,
+}
+
+/// Gateway mDNS advertisement configuration (`[gateway.mdns]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GatewayMdnsConfig {
+    /// Enable mDNS advertisement (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// mDNS service type to advertise (default: "_zeroclaw-gw._tcp.local.").
+    /// Must end with `.local.` for standard mDNS.
+    #[serde(default = "default_gateway_mdns_service_type")]
+    pub service_type: String,
+    /// Optional instance name override shown in mDNS browsers.
+    /// When empty, defaults to "<hostname>-zeroclaw".
+    #[serde(default)]
+    pub instance_name: Option<String>,
+    /// Include the gateway base URL path prefix in TXT (default: true).
+    #[serde(default = "default_true")]
+    pub include_path_prefix: bool,
+    /// Include the node WebSocket path in TXT (default: true).
+    #[serde(default = "default_true")]
+    pub include_ws_path: bool,
+    /// Also include a best-effort local IPv4/IPv6 in TXT (default: true).
+    /// Note: standard mDNS resolution already yields addresses; this is mainly
+    /// for debugging and minimal clients.
+    #[serde(default = "default_true")]
+    pub include_local_ip_txt: bool,
+}
+
+fn default_gateway_mdns_service_type() -> String {
+    "_zeroclaw-gw._tcp.local.".into()
+}
+
+impl Default for GatewayMdnsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_type: default_gateway_mdns_service_type(),
+            instance_name: None,
+            include_path_prefix: true,
+            include_ws_path: true,
+            include_local_ip_txt: true,
+        }
+    }
 }
 
 /// Node control configuration (`[gateway.node_control]` section).
@@ -2239,6 +2286,7 @@ impl Default for GatewayConfig {
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
             tls: None,
+            mdns: GatewayMdnsConfig::default(),
             node_control: NodeControlConfig::default(),
             a2a: A2aConfig::default(),
         }
