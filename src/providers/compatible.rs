@@ -9,10 +9,10 @@ use crate::providers::traits::{
     ToolCall as ProviderToolCall,
 };
 use async_trait::async_trait;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use reqwest::{
-    header::{HeaderMap, HeaderValue, USER_AGENT},
     Client,
+    header::{HeaderMap, HeaderValue, USER_AGENT},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -47,6 +47,9 @@ pub struct OpenAiCompatibleProvider {
     /// Custom API path suffix (e.g. "/v2/generate").
     /// When set, overrides the default `/chat/completions` path detection.
     api_path: Option<String>,
+    /// Maximum output tokens to include in API requests.
+    max_tokens: Option<u32>,
+    parallel_tool_calls: Option<bool>,
 }
 
 /// How the provider expects the API key to be sent.
@@ -58,6 +61,59 @@ pub enum AuthStyle {
     XApiKey,
     /// Custom header name
     Custom(String),
+    /// Zhipu/GLM JWT auth: the credential is `id.secret`, and a short-lived
+    /// JWT (HMAC-SHA256, 3.5 min expiry) is generated per request.
+    /// Used by Z.AI and GLM providers.
+    ZhipuJwt,
+}
+
+/// Generate a Zhipu JWT from an `id.secret` API key.
+/// Returns `Authorization: Bearer <jwt>` value. Token is valid for 3.5 minutes.
+fn zhipu_jwt_bearer(credential: &str) -> Result<String, String> {
+    let (id, secret) = credential
+        .split_once('.')
+        .ok_or_else(|| "Zhipu API key must be in 'id.secret' format".to_string())?;
+
+    #[allow(clippy::cast_possible_truncation)] // millis won't exceed u64 until year 584 million
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+    let exp_ms = now_ms + 210_000; // 3.5 minutes
+
+    // Header: {"alg":"HS256","typ":"JWT","sign_type":"SIGN"}
+    let header_b64 = base64url_no_pad(br#"{"alg":"HS256","typ":"JWT","sign_type":"SIGN"}"#);
+    let payload = format!(r#"{{"api_key":"{id}","exp":{exp_ms},"timestamp":{now_ms}}}"#);
+    let payload_b64 = base64url_no_pad(payload.as_bytes());
+
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let sig = ring::hmac::sign(&key, signing_input.as_bytes());
+    let sig_b64 = base64url_no_pad(sig.as_ref());
+
+    Ok(format!("Bearer {signing_input}.{sig_b64}"))
+}
+
+fn base64url_no_pad(data: &[u8]) -> String {
+    use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+    URL_SAFE_NO_PAD.encode(data)
+}
+
+/// Apply auth to a request builder (usable from spawned tasks without `&self`).
+fn apply_auth_to_request(
+    req: reqwest::RequestBuilder,
+    style: &AuthStyle,
+    credential: &str,
+) -> reqwest::RequestBuilder {
+    match style {
+        AuthStyle::Bearer => req.header("Authorization", format!("Bearer {credential}")),
+        AuthStyle::XApiKey => req.header("x-api-key", credential),
+        AuthStyle::Custom(header) => req.header(header, credential),
+        AuthStyle::ZhipuJwt => match zhipu_jwt_bearer(credential) {
+            Ok(val) => req.header("Authorization", val),
+            Err(_) => req.header("Authorization", format!("Bearer {credential}")),
+        },
+    }
 }
 
 impl OpenAiCompatibleProvider {
@@ -184,6 +240,8 @@ impl OpenAiCompatibleProvider {
             extra_headers: std::collections::HashMap::new(),
             reasoning_effort: None,
             api_path: None,
+            max_tokens: None,
+            parallel_tool_calls: None,
         }
     }
 
@@ -218,6 +276,17 @@ impl OpenAiCompatibleProvider {
     /// When set, replaces the default `/chat/completions` path.
     pub fn with_api_path(mut self, api_path: Option<String>) -> Self {
         self.api_path = api_path;
+        self
+    }
+
+    pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
+        self.parallel_tool_calls = parallel_tool_calls;
+        self
+    }
+
+    /// Set the maximum output tokens for API requests.
+    pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens;
         self
     }
 
@@ -399,9 +468,17 @@ impl OpenAiCompatibleProvider {
 
     fn reasoning_effort_for_model(&self, model: &str) -> Option<String> {
         let id = model.rsplit('/').next().unwrap_or(model);
-        let supports_reasoning_effort = id.starts_with("gpt-5") || id.contains("codex");
+        let supports_reasoning_effort = id.starts_with("gpt-5") || id.contains("codex") || id.contains("doubao");
         supports_reasoning_effort
             .then(|| self.reasoning_effort.clone())
+            .flatten()
+    }
+
+    fn parallel_tool_calls_for_model(&self, model: &str) -> Option<bool> {
+        let id = model.rsplit('/').next().unwrap_or(model);
+        let supports_parallel_tool_calls = id.contains("doubao");
+        supports_parallel_tool_calls
+            .then(|| self.parallel_tool_calls.clone())
             .flatten()
     }
 }
@@ -421,6 +498,10 @@ struct ApiChatRequest {
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -622,6 +703,10 @@ struct NativeChatRequest {
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -849,6 +934,44 @@ fn parse_sse_chunk(line: &str) -> StreamResult<Option<StreamChunkResponse>> {
         .map_err(StreamError::Json)
 }
 
+/// Parse custom proxy tool events from SSE lines.
+/// These are emitted by proxies like claude-max-api-proxy that execute tools
+/// internally and forward observability events via custom SSE fields.
+fn parse_proxy_tool_event(line: &str) -> Option<StreamEvent> {
+    let data = line.trim().strip_prefix("data:")?.trim();
+    let obj: serde_json::Value = serde_json::from_str(data).ok()?;
+
+    if let Some(ts) = obj.get("x_tool_start") {
+        let Some(name) = ts.get("name").and_then(|v| v.as_str()) else {
+            tracing::debug!("proxy x_tool_start event missing required 'name' field");
+            return None;
+        };
+        let name = name.to_string();
+        let args = ts
+            .get("arguments")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}")
+            .to_string();
+        return Some(StreamEvent::PreExecutedToolCall { name, args });
+    }
+
+    if let Some(tr) = obj.get("x_tool_result") {
+        let name = tr
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let output = tr
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Some(StreamEvent::PreExecutedToolResult { name, output });
+    }
+
+    None
+}
+
 fn extract_sse_text_delta(choice: &StreamChoice) -> Option<String> {
     if let Some(content) = &choice.delta.content {
         if !content.is_empty() {
@@ -866,9 +989,30 @@ fn extract_sse_text_delta(choice: &StreamChoice) -> Option<String> {
 
 /// Parse SSE (Server-Sent Events) stream from OpenAI-compatible providers.
 /// Handles the `data: {...}` format and `[DONE]` sentinel.
-fn parse_sse_line(line: &str) -> StreamResult<Option<String>> {
-    Ok(parse_sse_chunk(line)?
-        .and_then(|chunk| chunk.choices.first().and_then(extract_sse_text_delta)))
+///
+/// Returns a `StreamChunk` that distinguishes content from reasoning:
+/// - Content deltas → `StreamChunk::delta`
+/// - Reasoning deltas → `StreamChunk::reasoning`
+fn parse_sse_line(line: &str) -> StreamResult<Option<StreamChunk>> {
+    let chunk = match parse_sse_chunk(line)? {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    if let Some(choice) = chunk.choices.first() {
+        if let Some(content) = &choice.delta.content {
+            if !content.is_empty() {
+                return Ok(Some(StreamChunk::delta(content.clone())));
+            }
+        }
+        if let Some(reasoning) = &choice.delta.reasoning_content {
+            if !reasoning.is_empty() {
+                return Ok(Some(StreamChunk::reasoning(reasoning.clone())));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Convert SSE byte stream to text chunks.
@@ -890,22 +1034,35 @@ fn sse_bytes_to_chunks(
         }
 
         let mut bytes_stream = response.bytes_stream();
+        // Accumulate partial UTF-8 sequences that may be split across
+        // HTTP/1.1 chunked transfer boundaries (e.g. 3-byte CJK chars).
+        let mut utf8_buf: Vec<u8> = Vec::new();
 
         while let Some(item) = bytes_stream.next().await {
             match item {
                 Ok(bytes) => {
-                    let text = match String::from_utf8(bytes.to_vec()) {
-                        Ok(t) => t,
+                    utf8_buf.extend_from_slice(&bytes);
+                    let text = match std::str::from_utf8(&utf8_buf) {
+                        Ok(s) => {
+                            let owned = s.to_string();
+                            utf8_buf.clear();
+                            owned
+                        }
                         Err(e) => {
-                            let _ = tx
-                                .send(Err(StreamError::InvalidSse(format!(
-                                    "Invalid UTF-8: {}",
-                                    e
-                                ))))
-                                .await;
-                            break;
+                            let valid_up_to = e.valid_up_to();
+                            if valid_up_to == 0 && utf8_buf.len() < 4 {
+                                // Could still be an incomplete multi-byte char; wait for more data
+                                continue;
+                            }
+                            let valid =
+                                String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
+                            utf8_buf.drain(..valid_up_to);
+                            valid
                         }
                     };
+                    if text.is_empty() {
+                        continue;
+                    }
 
                     buffer.push_str(&text);
 
@@ -914,11 +1071,12 @@ fn sse_bytes_to_chunks(
                         buffer.drain(..=pos);
 
                         match parse_sse_line(&line) {
-                            Ok(Some(content)) => {
-                                let mut chunk = StreamChunk::delta(content);
-                                if count_tokens {
-                                    chunk = chunk.with_token_estimate();
-                                }
+                            Ok(Some(chunk)) => {
+                                let chunk = if count_tokens {
+                                    chunk.with_token_estimate()
+                                } else {
+                                    chunk
+                                };
                                 if tx.send(Ok(chunk)).await.is_err() {
                                     return; // Receiver dropped
                                 }
@@ -968,27 +1126,47 @@ fn sse_bytes_to_events(
         }
 
         let mut bytes_stream = response.bytes_stream();
+        // Accumulate partial UTF-8 sequences split across chunk boundaries.
+        let mut utf8_buf: Vec<u8> = Vec::new();
         while let Some(item) = bytes_stream.next().await {
             match item {
                 Ok(bytes) => {
-                    let text = match String::from_utf8(bytes.to_vec()) {
-                        Ok(t) => t,
+                    utf8_buf.extend_from_slice(&bytes);
+                    let text = match std::str::from_utf8(&utf8_buf) {
+                        Ok(s) => {
+                            let owned = s.to_string();
+                            utf8_buf.clear();
+                            owned
+                        }
                         Err(e) => {
-                            let _ = tx
-                                .send(Err(StreamError::InvalidSse(format!(
-                                    "Invalid UTF-8: {}",
-                                    e
-                                ))))
-                                .await;
-                            return;
+                            let valid_up_to = e.valid_up_to();
+                            if valid_up_to == 0 && utf8_buf.len() < 4 {
+                                continue;
+                            }
+                            let valid =
+                                String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
+                            utf8_buf.drain(..valid_up_to);
+                            valid
                         }
                     };
+                    if text.is_empty() {
+                        continue;
+                    }
 
                     buffer.push_str(&text);
 
                     while let Some(pos) = buffer.find('\n') {
                         let line = buffer[..pos].to_string();
                         buffer.drain(..=pos);
+
+                        // Custom proxy events for pre-executed tool calls
+                        // (e.g. claude-max-api-proxy streaming x_tool_start/x_tool_result)
+                        if let Some(event) = parse_proxy_tool_event(&line) {
+                            if tx.send(Ok(event)).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
 
                         let chunk = match parse_sse_chunk(&line) {
                             Ok(Some(chunk)) => chunk,
@@ -1179,6 +1357,10 @@ impl OpenAiCompatibleProvider {
             AuthStyle::Bearer => req.header("Authorization", format!("Bearer {credential}")),
             AuthStyle::XApiKey => req.header("x-api-key", credential),
             AuthStyle::Custom(header) => req.header(header, credential),
+            AuthStyle::ZhipuJwt => match zhipu_jwt_bearer(credential) {
+                Ok(val) => req.header("Authorization", val),
+                Err(_) => req.header("Authorization", format!("Bearer {credential}")),
+            },
         }
     }
 
@@ -1544,6 +1726,8 @@ impl Provider for OpenAiCompatibleProvider {
             tool_stream: None,
             tools: None,
             tool_choice: None,
+            max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -1668,6 +1852,8 @@ impl Provider for OpenAiCompatibleProvider {
             tool_stream: None,
             tools: None,
             tool_choice: None,
+            max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -1788,6 +1974,8 @@ impl Provider for OpenAiCompatibleProvider {
             } else {
                 Some("auto".to_string())
             },
+            max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -1900,6 +2088,8 @@ impl Provider for OpenAiCompatibleProvider {
                 .tool_stream_for_tools(tools.as_ref().is_some_and(|tools| !tools.is_empty())),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
+            max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -2052,6 +2242,8 @@ impl Provider for OpenAiCompatibleProvider {
                 stream: Some(options.enabled),
                 tools: tools.clone(),
                 tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+                max_tokens: self.max_tokens,
+                parallel_tool_calls: self.parallel_tool_calls_for_model(model),
             })
         } else {
             let messages = effective_messages
@@ -2075,6 +2267,8 @@ impl Provider for OpenAiCompatibleProvider {
                 stream: Some(options.enabled),
                 tools: None,
                 tool_choice: None,
+                max_tokens: self.max_tokens,
+                parallel_tool_calls: self.parallel_tool_calls_for_model(model),
             })
         };
 
@@ -2095,13 +2289,7 @@ impl Provider for OpenAiCompatibleProvider {
         tokio::spawn(async move {
             let mut req_builder = client.post(&url).json(&payload);
 
-            req_builder = match &auth_header {
-                AuthStyle::Bearer => {
-                    req_builder.header("Authorization", format!("Bearer {}", credential))
-                }
-                AuthStyle::XApiKey => req_builder.header("x-api-key", &credential),
-                AuthStyle::Custom(header) => req_builder.header(header, &credential),
-            };
+            req_builder = apply_auth_to_request(req_builder, &auth_header, &credential);
             req_builder = req_builder.header("Accept", "text/event-stream");
 
             let response = match req_builder.send().await {
@@ -2181,6 +2369,8 @@ impl Provider for OpenAiCompatibleProvider {
             tool_stream: None,
             tools: None,
             tool_choice: None,
+            max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
         };
 
         let url = self.chat_completions_url();
@@ -2195,13 +2385,7 @@ impl Provider for OpenAiCompatibleProvider {
             let mut req_builder = client.post(&url).json(&request);
 
             // Apply auth header
-            req_builder = match &auth_header {
-                AuthStyle::Bearer => {
-                    req_builder.header("Authorization", format!("Bearer {}", credential))
-                }
-                AuthStyle::XApiKey => req_builder.header("x-api-key", &credential),
-                AuthStyle::Custom(header) => req_builder.header(header, &credential),
-            };
+            req_builder = apply_auth_to_request(req_builder, &auth_header, &credential);
 
             // Set accept header for streaming
             req_builder = req_builder.header("Accept", "text/event-stream");
@@ -2238,6 +2422,102 @@ impl Provider for OpenAiCompatibleProvider {
         });
 
         // Convert channel receiver to stream
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|chunk| (chunk, rx))
+        })
+        .boxed()
+    }
+
+    fn stream_chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        temperature: f64,
+        options: StreamOptions,
+    ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
+        let credential = match self.credential.as_ref() {
+            Some(value) => value.clone(),
+            None => {
+                let provider_name = self.name.clone();
+                return stream::once(async move {
+                    Err(StreamError::Provider(format!(
+                        "{} API key not set",
+                        provider_name
+                    )))
+                })
+                .boxed();
+            }
+        };
+
+        let effective_messages = if self.merge_system_into_user {
+            Self::flatten_system_messages(messages)
+        } else {
+            messages.to_vec()
+        };
+        let api_messages: Vec<Message> = effective_messages
+            .iter()
+            .map(|m| Message {
+                role: m.role.clone(),
+                content: Self::to_message_content(
+                    &m.role,
+                    &m.content,
+                    !self.merge_system_into_user,
+                ),
+            })
+            .collect();
+
+        let request = ApiChatRequest {
+            model: model.to_string(),
+            messages: api_messages,
+            temperature,
+            stream: Some(options.enabled),
+            reasoning_effort: self.reasoning_effort_for_model(model),
+            tool_stream: None,
+            tools: None,
+            tool_choice: None,
+            max_tokens: self.max_tokens,
+            parallel_tool_calls: self.parallel_tool_calls_for_model(model),
+        };
+
+        let url = self.chat_completions_url();
+        let client = self.http_client();
+        let auth_header = self.auth_header.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+
+        tokio::spawn(async move {
+            let mut req_builder = client.post(&url).json(&request);
+            req_builder = apply_auth_to_request(req_builder, &auth_header, &credential);
+            req_builder = req_builder.header("Accept", "text/event-stream");
+
+            let response = match req_builder.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(StreamError::Http(e))).await;
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error = match response.text().await {
+                    Ok(e) => e,
+                    Err(_) => format!("HTTP error: {}", status),
+                };
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
+                    .await;
+                return;
+            }
+
+            let mut chunk_stream = sse_bytes_to_chunks(response, options.count_tokens);
+            while let Some(chunk) = chunk_stream.next().await {
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|chunk| (chunk, rx))
         })
@@ -2298,10 +2578,12 @@ mod tests {
             .chat_with_system(None, "hello", "llama-3.3-70b", 0.7)
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Venice API key not set"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Venice API key not set")
+        );
     }
 
     #[test]
@@ -2324,6 +2606,7 @@ mod tests {
             tool_stream: None,
             tools: None,
             tool_choice: None,
+            max_tokens: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("llama-3.3-70b"));
@@ -2395,6 +2678,79 @@ mod tests {
             AuthStyle::Custom("X-Custom-Key".into()),
         );
         assert!(matches!(p.auth_header, AuthStyle::Custom(_)));
+    }
+
+    #[test]
+    fn zhipu_jwt_produces_valid_three_part_token() {
+        let result = zhipu_jwt_bearer("testid.testsecret").unwrap();
+        assert!(result.starts_with("Bearer "));
+        let jwt = result.strip_prefix("Bearer ").unwrap();
+        let parts: Vec<&str> = jwt.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have 3 dot-separated parts: {jwt}");
+    }
+
+    #[test]
+    fn zhipu_jwt_header_is_correct() {
+        use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+        let result = zhipu_jwt_bearer("myid.mysecret").unwrap();
+        let jwt = result.strip_prefix("Bearer ").unwrap();
+        let header_b64 = jwt.split('.').next().unwrap();
+        let header_bytes = URL_SAFE_NO_PAD.decode(header_b64).unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
+        assert_eq!(header["alg"], "HS256");
+        assert_eq!(header["typ"], "JWT");
+        assert_eq!(header["sign_type"], "SIGN");
+    }
+
+    #[test]
+    fn zhipu_jwt_payload_contains_api_key_and_timestamps() {
+        use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+        let result = zhipu_jwt_bearer("myapiid.mysecretkey").unwrap();
+        let jwt = result.strip_prefix("Bearer ").unwrap();
+        let payload_b64 = jwt.split('.').nth(1).unwrap();
+        let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(payload["api_key"], "myapiid");
+        assert!(payload["exp"].is_number());
+        assert!(payload["timestamp"].is_number());
+        // exp should be ~210s after timestamp
+        let ts = payload["timestamp"].as_u64().unwrap();
+        let exp = payload["exp"].as_u64().unwrap();
+        assert_eq!(exp - ts, 210_000);
+    }
+
+    #[test]
+    fn zhipu_jwt_signature_is_verifiable() {
+        let secret = "testsecret123";
+        let credential = format!("testid.{secret}");
+        let result = zhipu_jwt_bearer(&credential).unwrap();
+        let jwt = result.strip_prefix("Bearer ").unwrap();
+        let parts: Vec<&str> = jwt.split('.').collect();
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+
+        // Verify HMAC-SHA256 signature
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+        let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        ring::hmac::verify(&key, signing_input.as_bytes(), &sig_bytes)
+            .expect("signature must verify");
+    }
+
+    #[test]
+    fn zhipu_jwt_rejects_invalid_key_format() {
+        assert!(zhipu_jwt_bearer("no-dot-here").is_err());
+        assert!(zhipu_jwt_bearer("").is_err());
+    }
+
+    #[test]
+    fn zhipu_jwt_auth_style_applies_correctly() {
+        let p = OpenAiCompatibleProvider::new(
+            "Z.AI",
+            "https://api.z.ai/api/coding/paas/v4",
+            Some("testid.testsecret"),
+            AuthStyle::ZhipuJwt,
+        );
+        assert!(matches!(p.auth_header, AuthStyle::ZhipuJwt));
     }
 
     #[tokio::test]
@@ -2517,9 +2873,10 @@ mod tests {
             .await
             .expect_err("system-only fallback payload should fail");
 
-        assert!(err
-            .to_string()
-            .contains("requires at least one non-system message"));
+        assert!(
+            err.to_string()
+                .contains("requires at least one non-system message")
+        );
     }
 
     #[test]
@@ -3132,6 +3489,7 @@ mod tests {
             tool_stream: None,
             tools: Some(tools),
             tool_choice: Some("auto".to_string()),
+            max_tokens: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"tools\""));
@@ -3166,6 +3524,7 @@ mod tests {
                 }
             })]),
             tool_choice: Some("auto".to_string()),
+            max_tokens: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -3199,6 +3558,7 @@ mod tests {
                 }
             })]),
             tool_choice: Some("auto".to_string()),
+            max_tokens: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -3307,10 +3667,12 @@ mod tests {
 
         let result = p.chat_with_tools(&messages, &tools, "model", 0.7).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("TestProvider API key not set"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("TestProvider API key not set")
+        );
     }
 
     #[test]
@@ -3451,37 +3813,41 @@ mod tests {
     #[test]
     fn parse_sse_line_with_content() {
         let line = r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#;
-        let result = parse_sse_line(line).unwrap();
-        assert_eq!(result, Some("hello".to_string()));
+        let result = parse_sse_line(line).unwrap().unwrap();
+        assert_eq!(result.delta, "hello");
+        assert!(result.reasoning.is_none());
     }
 
     #[test]
     fn parse_sse_line_with_reasoning_content() {
         let line = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#;
-        let result = parse_sse_line(line).unwrap();
-        assert_eq!(result, Some("thinking...".to_string()));
+        let result = parse_sse_line(line).unwrap().unwrap();
+        assert!(result.delta.is_empty());
+        assert_eq!(result.reasoning.as_deref(), Some("thinking..."));
     }
 
     #[test]
     fn parse_sse_line_with_both_prefers_content() {
         let line = r#"data: {"choices":[{"delta":{"content":"real answer","reasoning_content":"thinking..."}}]}"#;
-        let result = parse_sse_line(line).unwrap();
-        assert_eq!(result, Some("real answer".to_string()));
+        let result = parse_sse_line(line).unwrap().unwrap();
+        assert_eq!(result.delta, "real answer");
+        assert!(result.reasoning.is_none());
     }
 
     #[test]
-    fn parse_sse_line_with_empty_content_falls_back_to_reasoning_content() {
+    fn parse_sse_line_with_empty_content_falls_back_to_reasoning() {
         let line =
             r#"data: {"choices":[{"delta":{"content":"","reasoning_content":"thinking..."}}]}"#;
-        let result = parse_sse_line(line).unwrap();
-        assert_eq!(result, Some("thinking...".to_string()));
+        let result = parse_sse_line(line).unwrap().unwrap();
+        assert!(result.delta.is_empty());
+        assert_eq!(result.reasoning.as_deref(), Some("thinking..."));
     }
 
     #[test]
     fn parse_sse_line_done_sentinel() {
         let line = "data: [DONE]";
         let result = parse_sse_line(line).unwrap();
-        assert_eq!(result, None);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -3787,5 +4153,79 @@ mod tests {
         assert!(!json.as_object().unwrap().contains_key("type"));
         assert!(!json.as_object().unwrap().contains_key("function"));
         assert!(!json.as_object().unwrap().contains_key("parameters"));
+    }
+
+    // ── parse_proxy_tool_event tests ──
+
+    #[test]
+    fn proxy_tool_start_valid() {
+        let line = r#"data: {"x_tool_start":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}"#;
+        let event = parse_proxy_tool_event(line);
+        assert!(matches!(
+            event,
+            Some(StreamEvent::PreExecutedToolCall { ref name, ref args })
+            if name == "bash" && args == r#"{"cmd":"ls"}"#
+        ));
+    }
+
+    #[test]
+    fn proxy_tool_start_missing_name_returns_none() {
+        let line = r#"data: {"x_tool_start":{"arguments":"{}"}}"#;
+        assert!(parse_proxy_tool_event(line).is_none());
+    }
+
+    #[test]
+    fn proxy_tool_start_missing_arguments_defaults() {
+        let line = r#"data: {"x_tool_start":{"name":"read"}}"#;
+        let event = parse_proxy_tool_event(line);
+        assert!(matches!(
+            event,
+            Some(StreamEvent::PreExecutedToolCall { ref name, ref args })
+            if name == "read" && args == "{}"
+        ));
+    }
+
+    #[test]
+    fn proxy_tool_result_valid() {
+        let line = r#"data: {"x_tool_result":{"name":"bash","output":"hello world"}}"#;
+        let event = parse_proxy_tool_event(line);
+        assert!(matches!(
+            event,
+            Some(StreamEvent::PreExecutedToolResult { ref name, ref output })
+            if name == "bash" && output == "hello world"
+        ));
+    }
+
+    #[test]
+    fn proxy_tool_result_missing_fields_uses_defaults() {
+        let line = r#"data: {"x_tool_result":{}}"#;
+        let event = parse_proxy_tool_event(line);
+        assert!(matches!(
+            event,
+            Some(StreamEvent::PreExecutedToolResult { ref name, ref output })
+            if name == "unknown" && output.is_empty()
+        ));
+    }
+
+    #[test]
+    fn proxy_tool_event_non_json_returns_none() {
+        assert!(parse_proxy_tool_event("data: not json").is_none());
+    }
+
+    #[test]
+    fn proxy_tool_event_no_data_prefix_returns_none() {
+        let line = r#"{"x_tool_start":{"name":"bash"}}"#;
+        assert!(parse_proxy_tool_event(line).is_none());
+    }
+
+    #[test]
+    fn proxy_tool_event_standard_openai_chunk_returns_none() {
+        let line = r#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hi"}}]}"#;
+        assert!(parse_proxy_tool_event(line).is_none());
+    }
+
+    #[test]
+    fn proxy_tool_event_done_sentinel_returns_none() {
+        assert!(parse_proxy_tool_event("data: [DONE]").is_none());
     }
 }

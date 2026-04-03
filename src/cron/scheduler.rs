@@ -7,19 +7,22 @@ use crate::channels::MatrixChannel;
 #[cfg(feature = "whatsapp-web")]
 use crate::channels::WhatsAppWebChannel;
 use crate::channels::{
-    Channel, DingTalkChannel, DiscordChannel, MattermostChannel, QQChannel, SendMessage,
+    Channel,DingTalkChannel, DiscordChannel, MattermostChannel, QQChannel, SendMessage,
     SignalChannel, SlackChannel, TelegramChannel,
 };
+#[cfg(feature = "channel-lark")]
+use crate::channels::LarkChannel;
 use crate::config::Config;
+use crate::config::schema::{CronJobDecl, CronScheduleDecl};
 use crate::cron::{
-    all_overdue_jobs, due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job,
-    reschedule_after_run, sync_declarative_jobs, update_job, CronJob, CronJobPatch, DeliveryConfig,
-    JobType, Schedule, SessionTarget,
+    CronJob, CronJobPatch, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs,
+    due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job, reschedule_after_run,
+    sync_declarative_jobs, update_job,
 };
 use crate::security::SecurityPolicy;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -41,11 +44,36 @@ pub async fn run(config: Config) -> Result<()> {
     crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
     // ── Declarative job sync: reconcile config-defined jobs with the DB.
-    match sync_declarative_jobs(&config, &config.cron.jobs) {
+    let mut jobs_with_builtin = config.cron.jobs.clone();
+    if let Some(ref schedule_cron) = config.backup.schedule_cron {
+        let backup_job = CronJobDecl {
+            id: "__builtin_backup".to_string(),
+            name: Some("Scheduled backup".to_string()),
+            job_type: "shell".to_string(),
+            schedule: CronScheduleDecl::Cron {
+                expr: schedule_cron.clone(),
+                tz: config.backup.schedule_timezone.clone(),
+            },
+            command: Some("backup create".to_string()),
+            prompt: None,
+            enabled: true,
+            model: None,
+            allowed_tools: None,
+            session_target: None,
+            delivery: None,
+        };
+        tracing::debug!(
+            schedule = %schedule_cron,
+            "Synthesizing builtin backup cron job from config.backup.schedule_cron"
+        );
+        jobs_with_builtin.push(backup_job);
+    }
+
+    match sync_declarative_jobs(&config, &jobs_with_builtin) {
         Ok(()) => {
-            if !config.cron.jobs.is_empty() {
+            if !jobs_with_builtin.is_empty() {
                 tracing::info!(
-                    count = config.cron.jobs.len(),
+                    count = jobs_with_builtin.len(),
                     "Synced declarative cron jobs from config"
                 );
             }
@@ -237,20 +265,28 @@ async fn run_agent_job(
     }
     let name = job.name.clone().unwrap_or_else(|| "cron-job".to_string());
     let prompt = job.prompt.clone().unwrap_or_default();
-    let configured_prefix = config.cron.agent_prompt_prefix.trim();
-    let default_prefix =
-        "你是定时消息投递助手。请严格按以下格式输出，且只能输出这一个标签块，不得输出任何其他文字（包括思考、分析、解释、前后缀）：\n<final>给用户的最终内容</final>";
-    let final_only_constraint =
-        "输出只需 <final>给用户的最终内容</final>（除该标签块外不要输出任何文字）。";
 
-    // Always enforce the <final> output constraint, even when a custom prefix is configured.
-    let prefix = if configured_prefix.is_empty() {
-        format!("{default_prefix}\n{final_only_constraint}")
-    } else {
-        format!("{configured_prefix}\n{final_only_constraint}")
+    // Recall relevant memories so cron jobs have context awareness.
+    let memory_context = match crate::memory::create_memory(
+        &config.memory,
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    ) {
+        Ok(mem) => match mem.recall(&prompt, 5, None, None, None).await {
+            Ok(entries) if !entries.is_empty() => {
+                let ctx: String = entries
+                    .iter()
+                    .map(|e| format!("- {}: {}", e.key, e.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("[Memory context]\n{ctx}\n\n")
+            }
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
     };
 
-    let prefixed_prompt = format!("[cron:{} {name}] {prefix}\n{prompt}", job.id);
+    let prefixed_prompt = format!("{memory_context}[cron:{} {name}] {prompt}", job.id);
     let model_override = job.model.clone();
 
     let run_result = match job.session_target {
@@ -640,6 +676,7 @@ pub(crate) async fn deliver_announcement_with_context(
                     wa.pair_phone.clone(),
                     wa.pair_code.clone(),
                     wa.allowed_numbers.clone(),
+                    wa.mention_only,
                     wa.mode.clone(),
                     wa.dm_policy.clone(),
                     wa.group_policy.clone(),
@@ -1621,9 +1658,10 @@ mod tests {
         let err = deliver_if_configured(&config, &job, "hello", Utc::now())
             .await
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("matrix delivery channel requires `channel-matrix` feature"));
+        assert!(
+            err.to_string()
+                .contains("matrix delivery channel requires `channel-matrix` feature")
+        );
     }
 
     #[test]

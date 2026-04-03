@@ -463,6 +463,7 @@ struct ResponseToolUseWrapper {
 
 pub struct BedrockProvider {
     auth: Option<BedrockAuth>,
+    max_tokens: u32,
 }
 
 impl BedrockProvider {
@@ -471,10 +472,12 @@ impl BedrockProvider {
         if let Some(token) = env_optional("BEDROCK_API_KEY") {
             return Self {
                 auth: Some(BedrockAuth::BearerToken(token)),
+                max_tokens: DEFAULT_MAX_TOKENS,
             };
         }
         Self {
             auth: AwsCredentials::from_env().ok().map(BedrockAuth::SigV4),
+            max_tokens: DEFAULT_MAX_TOKENS,
         }
     }
 
@@ -483,17 +486,28 @@ impl BedrockProvider {
         if let Some(token) = env_optional("BEDROCK_API_KEY") {
             return Self {
                 auth: Some(BedrockAuth::BearerToken(token)),
+                max_tokens: DEFAULT_MAX_TOKENS,
             };
         }
         let auth = AwsCredentials::resolve().await.ok().map(BedrockAuth::SigV4);
-        Self { auth }
+        Self {
+            auth,
+            max_tokens: DEFAULT_MAX_TOKENS,
+        }
     }
 
     /// Create a provider using a Bearer token for authentication.
     pub fn with_bearer_token(token: &str) -> Self {
         Self {
             auth: Some(BedrockAuth::BearerToken(token.to_string())),
+            max_tokens: DEFAULT_MAX_TOKENS,
         }
+    }
+
+    /// Override the maximum output tokens for API requests.
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 
     fn http_client(&self) -> Client {
@@ -1090,7 +1104,7 @@ impl Provider for BedrockProvider {
                 content: Self::parse_user_content_blocks(message),
             }],
             inference_config: Some(InferenceConfig {
-                max_tokens: DEFAULT_MAX_TOKENS,
+                max_tokens: self.max_tokens,
                 temperature,
             }),
             tool_config: None,
@@ -1143,7 +1157,7 @@ impl Provider for BedrockProvider {
             system,
             messages: converse_messages,
             inference_config: Some(InferenceConfig {
-                max_tokens: DEFAULT_MAX_TOKENS,
+                max_tokens: self.max_tokens,
                 temperature,
             }),
             tool_config,
@@ -1173,36 +1187,8 @@ impl Provider for BedrockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::test_util::{EnvGuard, env_lock};
     use crate::providers::traits::ChatMessage;
-
-    /// RAII guard that sets/unsets an env var and restores the original on drop.
-    struct EnvGuard {
-        key: String,
-        original: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &str, value: Option<&str>) -> Self {
-            let original = std::env::var(key).ok();
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-            Self {
-                key: key.to_string(),
-                original,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(v) => std::env::set_var(&self.key, v),
-                None => std::env::remove_var(&self.key),
-            }
-        }
-    }
 
     // ── SigV4 signing tests ─────────────────────────────────────
 
@@ -1355,7 +1341,13 @@ mod tests {
 
     #[tokio::test]
     async fn chat_fails_without_credentials() {
-        let provider = BedrockProvider { auth: None };
+        let provider = {
+            let _env_lock = env_lock();
+            BedrockProvider {
+                auth: None,
+                max_tokens: DEFAULT_MAX_TOKENS,
+            }
+        };
         let result = provider
             .chat_with_system(None, "hello", "anthropic.claude-sonnet-4-6", 0.7)
             .await;
@@ -1383,6 +1375,7 @@ mod tests {
 
     #[test]
     fn bearer_token_from_env() {
+        let _env_lock = env_lock();
         let _guard = EnvGuard::set("BEDROCK_API_KEY", Some("env-bearer-token"));
         // Clear SigV4 vars to ensure Bearer is chosen.
         let _ak_guard = EnvGuard::set("AWS_ACCESS_KEY_ID", None);
@@ -1397,6 +1390,7 @@ mod tests {
 
     #[test]
     fn bearer_token_precedence() {
+        let _env_lock = env_lock();
         let _bearer_guard = EnvGuard::set("BEDROCK_API_KEY", Some("bearer-key"));
         let _ak_guard = EnvGuard::set("AWS_ACCESS_KEY_ID", Some("AKIAEXAMPLE"));
         let _sk_guard = EnvGuard::set("AWS_SECRET_ACCESS_KEY", Some("secret"));
@@ -1689,14 +1683,20 @@ mod tests {
 
     #[tokio::test]
     async fn warmup_without_credentials_is_noop() {
-        let provider = BedrockProvider { auth: None };
+        let provider = BedrockProvider {
+            auth: None,
+            max_tokens: DEFAULT_MAX_TOKENS,
+        };
         let result = provider.warmup().await;
         assert!(result.is_ok());
     }
 
     #[test]
     fn capabilities_reports_native_tool_calling() {
-        let provider = BedrockProvider { auth: None };
+        let provider = BedrockProvider {
+            auth: None,
+            max_tokens: DEFAULT_MAX_TOKENS,
+        };
         let caps = provider.capabilities();
         assert!(caps.native_tool_calling);
     }

@@ -510,7 +510,7 @@ impl BotServiceChannel {
             timestamp,
             thread_ts: None,
             interruption_scope_id: None,
-            attachments: Vec::new()
+            attachments: Vec::new(),
         };
 
         if let Err(err) = tx.send(msg).await {

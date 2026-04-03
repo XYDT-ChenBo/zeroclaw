@@ -102,7 +102,9 @@ impl HttpRequestTool {
             "PATCH" => Ok(reqwest::Method::PATCH),
             "HEAD" => Ok(reqwest::Method::HEAD),
             "OPTIONS" => Ok(reqwest::Method::OPTIONS),
-            _ => anyhow::bail!("Unsupported HTTP method: {method}. Supported: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"),
+            _ => anyhow::bail!(
+                "Unsupported HTTP method: {method}. Supported: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
+            ),
         }
     }
 
@@ -259,7 +261,7 @@ impl Tool for HttpRequestTool {
                     success: false,
                     output: String::new(),
                     error: Some(e.to_string()),
-                })
+                });
             }
         };
 
@@ -270,7 +272,18 @@ impl Tool for HttpRequestTool {
                     success: false,
                     output: String::new(),
                     error: Some(e.to_string()),
-                })
+                });
+            }
+        };
+
+        let url = match self.validate_url(&resolved_url) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e.to_string()),
+                });
             }
         };
 
@@ -281,7 +294,7 @@ impl Tool for HttpRequestTool {
                     success: false,
                     output: String::new(),
                     error: Some(e.to_string()),
-                })
+                });
             }
         };
 
@@ -620,7 +633,7 @@ mod tests {
     #[test]
     fn validate_requires_allowlist() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = HttpRequestTool::new(security, vec![], 1_000_000, 30, false,HashMap::new());
+        let tool = HttpRequestTool::new(security, vec![], 1_000_000, 30, false, HashMap::new());
         let err = tool
             .validate_url("https://example.com")
             .unwrap_err()
@@ -837,15 +850,77 @@ mod tests {
         });
         let parsed = tool.parse_headers(&headers);
         assert_eq!(parsed.len(), 3);
-        assert!(parsed
-            .iter()
-            .any(|(k, v)| k == "Authorization" && v == "Bearer secret"));
-        assert!(parsed
-            .iter()
-            .any(|(k, v)| k == "X-API-Key" && v == "my-key"));
-        assert!(parsed
-            .iter()
-            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "Bearer secret")
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "X-API-Key" && v == "my-key")
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "Content-Type" && v == "application/json")
+        );
+    }
+
+    #[test]
+    fn apply_url_placeholders_replaces_configured_tokens() {
+        let mut placeholders = HashMap::new();
+        placeholders.insert("WEATHER_API_KEY".to_string(), "secret-key".to_string());
+        let tool = HttpRequestTool::new(
+            Arc::new(SecurityPolicy::default()),
+            vec!["api.example.com".into()],
+            1_000_000,
+            30,
+            false,
+            placeholders,
+        );
+        let got = tool
+            .apply_url_placeholders("https://api.example.com/data?key={{WEATHER_API_KEY}}")
+            .unwrap();
+        assert_eq!(got, "https://api.example.com/data?key=secret-key");
+    }
+
+    #[test]
+    fn apply_url_placeholders_errors_when_missing_mapping() {
+        let tool = test_tool(vec!["example.com"]);
+        let err = tool
+            .apply_url_placeholders("https://example.com?key={{MISSING_KEY}}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Missing URL placeholder value"));
+    }
+
+    #[test]
+    fn apply_url_placeholders_replaces_configured_tokens() {
+        let mut placeholders = HashMap::new();
+        placeholders.insert("WEATHER_API_KEY".to_string(), "secret-key".to_string());
+        let tool = HttpRequestTool::new(
+            Arc::new(SecurityPolicy::default()),
+            vec!["api.example.com".into()],
+            1_000_000,
+            30,
+            false,
+            placeholders,
+        );
+        let got = tool
+            .apply_url_placeholders("https://api.example.com/data?key={{WEATHER_API_KEY}}")
+            .unwrap();
+        assert_eq!(got, "https://api.example.com/data?key=secret-key");
+    }
+
+    #[test]
+    fn apply_url_placeholders_errors_when_missing_mapping() {
+        let tool = test_tool(vec!["example.com"]);
+        let err = tool
+            .apply_url_placeholders("https://example.com?key={{MISSING_KEY}}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Missing URL placeholder value"));
     }
 
     #[test]
@@ -886,18 +961,26 @@ mod tests {
         ];
         let redacted = HttpRequestTool::redact_headers_for_display(&headers);
         assert_eq!(redacted.len(), 4);
-        assert!(redacted
-            .iter()
-            .any(|(k, v)| k == "Authorization" && v == "***REDACTED***"));
-        assert!(redacted
-            .iter()
-            .any(|(k, v)| k == "X-API-Key" && v == "***REDACTED***"));
-        assert!(redacted
-            .iter()
-            .any(|(k, v)| k == "X-Secret-Token" && v == "***REDACTED***"));
-        assert!(redacted
-            .iter()
-            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        assert!(
+            redacted
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "***REDACTED***")
+        );
+        assert!(
+            redacted
+                .iter()
+                .any(|(k, v)| k == "X-API-Key" && v == "***REDACTED***")
+        );
+        assert!(
+            redacted
+                .iter()
+                .any(|(k, v)| k == "X-Secret-Token" && v == "***REDACTED***")
+        );
+        assert!(
+            redacted
+                .iter()
+                .any(|(k, v)| k == "Content-Type" && v == "application/json")
+        );
     }
 
     #[test]
@@ -1039,21 +1122,24 @@ mod tests {
     #[test]
     fn default_blocks_private_hosts() {
         let tool = test_tool(vec!["localhost", "192.168.1.5", "*"]);
-        assert!(tool
-            .validate_url("https://localhost:8080")
-            .unwrap_err()
-            .to_string()
-            .contains("local/private"));
-        assert!(tool
-            .validate_url("https://192.168.1.5")
-            .unwrap_err()
-            .to_string()
-            .contains("local/private"));
-        assert!(tool
-            .validate_url("https://10.0.0.1")
-            .unwrap_err()
-            .to_string()
-            .contains("local/private"));
+        assert!(
+            tool.validate_url("https://localhost:8080")
+                .unwrap_err()
+                .to_string()
+                .contains("local/private")
+        );
+        assert!(
+            tool.validate_url("https://192.168.1.5")
+                .unwrap_err()
+                .to_string()
+                .contains("local/private")
+        );
+        assert!(
+            tool.validate_url("https://10.0.0.1")
+                .unwrap_err()
+                .to_string()
+                .contains("local/private")
+        );
     }
 
     #[test]
@@ -1093,10 +1179,11 @@ mod tests {
     #[test]
     fn allow_private_hosts_false_still_blocks() {
         let tool = test_tool_with_private(vec!["*"], false);
-        assert!(tool
-            .validate_url("https://localhost:8080")
-            .unwrap_err()
-            .to_string()
-            .contains("local/private"));
+        assert!(
+            tool.validate_url("https://localhost:8080")
+                .unwrap_err()
+                .to_string()
+                .contains("local/private")
+        );
     }
 }

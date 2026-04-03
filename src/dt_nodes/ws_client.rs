@@ -1,4 +1,8 @@
-use crate::dt_nodes::{executor, NodeIdentityFile};
+use crate::dt_nodes::{
+    executor,
+    node_runtime_trace::{self, NodeTraceCtx},
+    NodeIdentityFile,
+};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -76,6 +80,13 @@ pub async fn run_loop(
 
         let (mut sink, mut stream) = ws_stream.split();
 
+        node_runtime_trace::ws_connected(
+            &identity.device_id,
+            &identity.gateway.host,
+            identity.gateway.port,
+            attempt,
+        );
+
         let session_result: Result<()> = loop {
             select! {
                 biased;
@@ -90,8 +101,23 @@ pub async fn run_loop(
                         break Ok(());
                     };
 
-                    let Message::Text(text) = message? else {
-                        continue;
+                    let message = match message {
+                        Ok(message) => message,
+                        Err(e) => break Err(e.into()),
+                    };
+                    let text = match message {
+                        Message::Text(text) => text,
+                        Message::Close(frame) => {
+                            tracing::info!(
+                                "zeroclaw node websocket closed by server: {:?}",
+                                frame
+                            );
+                            break Ok(());
+                        }
+                        _ => {
+                            tracing::warn!("zeroclaw node websocket received unexpected message: {:?}", message);
+                            continue;
+                        }
                     };
 
                     let parsed: Value = match serde_json::from_str(&text) {
@@ -104,11 +130,13 @@ pub async fn run_loop(
                     if frame_type == "event" && event == "connect.challenge" {
                         let nonce = parsed["payload"]["nonce"].as_str().unwrap_or("").to_string();
                         let connect = build_connect_request(identity, nonce);
-                        sink.send(Message::Text(connect.to_string().into()))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("failed to send connect frame: {e}"))?;
+                        if let Err(e) = sink.send(Message::Text(connect.to_string().into())).await {
+                            break Err(anyhow::anyhow!("failed to send connect frame: {e}"));
+                        }
                     } else if frame_type == "event" && event == "node.invoke.request" {
-                        handle_invoke_request(&mut sink, identity, &parsed).await?;
+                        if let Err(e) = handle_invoke_request(&mut sink, identity, &parsed).await {
+                            break Err(e);
+                        }
                     }
                 }
             }
@@ -116,8 +144,14 @@ pub async fn run_loop(
 
         if let Err(e) = session_result {
             tracing::warn!("zeroclaw node session ended with error: {}", e);
+            node_runtime_trace::ws_session_ended(
+                &identity.device_id,
+                "error",
+                Some(&e.to_string()),
+            );
         } else {
             tracing::info!("zeroclaw node session ended; will retry unless stopped");
+            node_runtime_trace::ws_session_ended(&identity.device_id, "closed", None);
         }
 
         // before next reconnect, check stop again
@@ -153,6 +187,10 @@ fn build_connect_request(identity: &NodeIdentityFile, nonce: String) -> serde_js
     let caps = vec!["system", "file", "camera"];
     let commands = vec!["system.run", "media.saveImage", "camera.snap"];
 
+    let auth = serde_json::json!({
+        "token": identity.gateway.token.clone(),
+    });
+
     serde_json::json!({
         "type": "req",
         "id": uuid::Uuid::new_v4().to_string(),
@@ -163,6 +201,7 @@ fn build_connect_request(identity: &NodeIdentityFile, nonce: String) -> serde_js
             "device": device,
             "caps": caps,
             "commands": commands,
+            "auth": auth,
         }
     })
 }
@@ -198,7 +237,27 @@ async fn handle_invoke_request<
         return Ok(());
     }
 
-    let outcome = executor::handle_invoke(&command, &params_json).await;
+    tracing::info!(
+        req_id = %req_id,
+        command = %command,
+        node_id = %identity.device_id,
+        "dt_nodes: node.invoke.request accepted"
+    );
+
+    let trace_ctx = NodeTraceCtx {
+        req_id: req_id.as_str(),
+        node_id: identity.device_id.as_str(),
+    };
+    node_runtime_trace::invoke_started(&trace_ctx, &command);
+    let outcome = executor::handle_invoke(&command, &params_json, Some(&trace_ctx)).await;
+    node_runtime_trace::invoke_completed(&trace_ctx, &command, &outcome);
+
+    tracing::info!(
+        req_id = %req_id,
+        command = %command,
+        ok = outcome.ok,
+        "dt_nodes: node.invoke completed, sending result"
+    );
 
     let mut params_map = serde_json::Map::new();
     params_map.insert("id".to_string(), Value::String(req_id.clone()));

@@ -6,6 +6,7 @@ use tokio::signal;
 
 mod executor;
 mod handlers;
+mod node_runtime_trace;
 mod ws_client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

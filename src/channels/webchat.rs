@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use axum::{
     extract::State,
+    http::{header, HeaderMap},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -15,6 +16,7 @@ use std::{collections::HashMap, convert::Infallible, sync::Arc};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use uuid::Uuid;
+use crate::security::PairingGuard;
 
 #[derive(Debug)]
 pub struct WebchatChannel {
@@ -22,6 +24,7 @@ pub struct WebchatChannel {
     listen_path: String,
     callback_url: Option<String>,
     callback_auth_header: Option<String>,
+    pairing: PairingGuard,
     sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
 }
 
@@ -32,7 +35,6 @@ struct SessionEntry {
     completion_id: String,
     created: i64,
     wants_stream: bool,
-    is_thinking: bool,
     first_chunk_sent: bool,
     mode: SessionMode,
 }
@@ -79,6 +81,8 @@ impl WebchatChannel {
         listen_path: Option<String>,
         callback_url: Option<String>,
         callback_auth_header: Option<String>,
+        require_pairing: bool,
+        paired_tokens: Vec<String>,
     ) -> Self {
         let path = listen_path.unwrap_or_else(|| "/webchat".to_string());
         let listen_path = if path.starts_with('/') {
@@ -92,6 +96,7 @@ impl WebchatChannel {
             listen_path,
             callback_url,
             callback_auth_header,
+            pairing: PairingGuard::new(require_pairing, &paired_tokens),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -137,6 +142,26 @@ impl WebchatChannel {
             .find(|m| m.role == "user")
             .map(|m| m.content.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|auth| {
+                auth.strip_prefix("Bearer ")
+                    .or_else(|| auth.strip_prefix("bearer "))
+            })
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+    }
+
+    fn is_request_authorized(&self, headers: &HeaderMap) -> bool {
+        if !self.pairing.require_pairing() {
+            return true;
+        }
+        let token = Self::extract_bearer_token(headers).unwrap_or("");
+        self.pairing.is_authenticated(token)
     }
 
     fn completion_json(id: &str, created: i64, model: &str, content: &str) -> serde_json::Value {
@@ -186,6 +211,7 @@ impl Clone for WebchatChannel {
             listen_path: self.listen_path.clone(),
             callback_url: self.callback_url.clone(),
             callback_auth_header: self.callback_auth_header.clone(),
+            pairing: self.pairing.clone(),
             sessions: Arc::clone(&self.sessions),
         }
     }
@@ -211,17 +237,20 @@ impl Channel for WebchatChannel {
         Ok(Some(session_id))
     }
 
-    async fn update_draft(&self, recipient: &str, _message_id: &str, text: &str) -> Result<()> {
+
+    // async fn update_draft(&self, recipient: &str, _message_id: &str, text: &str) -> Result<()> {
+    //     // update draft 会返回思考的信息，如果需要再实现
+    //     let _ = text;
+    //     Ok(())
+    // }
+
+    async fn update_draft_progress(&self, recipient: &str, _message_id: &str, text: &str) -> Result<()> {
         let dispatch = {
             let mut sessions = self.sessions.lock().await;
             let Some(entry) = sessions.get_mut(recipient) else {
                 return Ok(());
             };
             if !entry.wants_stream {
-                return Ok(());
-            }
-            if text == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
-                entry.is_thinking = false;
                 return Ok(());
             }
             let delta = if entry.first_chunk_sent {
@@ -236,7 +265,7 @@ impl Channel for WebchatChannel {
                 &entry.model_label,
                 delta,
                 None,
-                entry.is_thinking,
+                true,
             );
             match &entry.mode {
                 SessionMode::Stream(tx) => Some((
@@ -276,14 +305,19 @@ impl Channel for WebchatChannel {
 
         match entry.mode {
             SessionMode::Stream(tx) => {
-                if !entry.first_chunk_sent && !text.is_empty() {
+                if !text.is_empty() {
+                    let delta = if entry.first_chunk_sent {
+                        serde_json::json!({ "content": text })
+                    } else {
+                        serde_json::json!({ "role": "assistant", "content": text })
+                    };
                     let payload = Self::stream_chunk_json(
                         &entry.completion_id,
                         entry.created,
                         &entry.model_label,
-                        serde_json::json!({ "role": "assistant", "content": text }),
+                        delta,
                         None,
-                        entry.is_thinking,
+                        false,
                     );
                     let _ = tx.send(StreamFrame::Chunk(payload)).await;
                 }
@@ -303,14 +337,19 @@ impl Channel for WebchatChannel {
             }
             SessionMode::CallbackOnly => {
                 if entry.wants_stream {
-                    if !entry.first_chunk_sent && !text.is_empty() {
+                    if !text.is_empty() {
+                        let delta = if entry.first_chunk_sent {
+                            serde_json::json!({ "content": text })
+                        } else {
+                            serde_json::json!({ "role": "assistant", "content": text })
+                        };
                         let payload = Self::stream_chunk_json(
                             &entry.completion_id,
                             entry.created,
                             &entry.model_label,
-                            serde_json::json!({ "role": "assistant", "content": text }),
+                            delta,
                             None,
-                            entry.is_thinking,
+                            false,
                         );
                         let _ = self
                             .send_callback_payload(recipient, &entry.sender, payload)
@@ -357,8 +396,19 @@ impl Channel for WebchatChannel {
 
         async fn handle_incoming(
             State(state): State<AppState>,
+            headers: HeaderMap,
             Json(body): Json<HttpChatRequest>,
         ) -> axum::response::Response {
+            if !state.channel.is_request_authorized(&headers) {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Unauthorized — provide Authorization: Bearer <token>"
+                    })),
+                )
+                    .into_response();
+            }
+
             if body.messages.is_empty() {
                 return (
                     axum::http::StatusCode::BAD_REQUEST,
@@ -424,7 +474,6 @@ impl Channel for WebchatChannel {
                         completion_id: completion_id.clone(),
                         created,
                         wants_stream,
-                        is_thinking: true,
                         first_chunk_sent: false,
                         mode,
                     },

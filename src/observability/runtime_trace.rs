@@ -1,6 +1,6 @@
 use crate::config::ObservabilityConfig;
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
@@ -29,7 +29,7 @@ impl RuntimeTraceStorageMode {
     }
 }
 
-/// Structured runtime trace event for tool-call and model-reply diagnostics.
+/// Structured runtime trace event for tool-call, model-reply, and dt-node diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeTraceEvent {
     pub id: String,
@@ -213,7 +213,7 @@ pub fn record_event(
 
     let event = RuntimeTraceEvent {
         id: Uuid::new_v4().to_string(),
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: Local::now().to_rfc3339(),
         event_type: event_type.to_string(),
         channel: channel.map(str::to_string),
         provider: provider.map(str::to_string),

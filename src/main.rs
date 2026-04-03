@@ -33,14 +33,14 @@
     dead_code
 )]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use dialoguer::Password;
 use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use tracing::{info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
@@ -109,6 +109,8 @@ mod skillforge;
 mod skills;
 mod sop;
 mod tools;
+mod trust;
+mod tui;
 mod tunnel;
 mod util;
 mod verifiable_intent;
@@ -193,6 +195,14 @@ enum Commands {
         /// Memory backend (sqlite, lucid, markdown, none) - used in quick mode, default: sqlite
         #[arg(long)]
         memory: Option<String>,
+
+        /// Skip interactive prompts and use quick setup with defaults
+        #[arg(long)]
+        quick: bool,
+
+        /// Use the ratatui-based TUI onboarding wizard
+        #[arg(long)]
+        tui: bool,
     },
 
     /// Start the AI agent loop
@@ -247,6 +257,29 @@ Examples:
     Gateway {
         #[command(subcommand)]
         gateway_command: Option<zeroclaw::GatewayCommands>,
+    },
+
+    /// Start ACP (Agent Control Protocol) server over stdio
+    #[command(long_about = "\
+Start the ACP server (JSON-RPC 2.0 over stdio).
+
+Launches a JSON-RPC 2.0 server on stdin/stdout for IDE and tool \
+integration. Supports session management and streaming agent \
+responses as notifications.
+
+Methods: initialize, session/new, session/prompt, session/stop.
+
+Examples:
+  zeroclaw acp                        # start ACP server
+  zeroclaw acp --max-sessions 5       # limit concurrent sessions")]
+    Acp {
+        /// Maximum concurrent sessions (default: 10)
+        #[arg(long)]
+        max_sessions: Option<usize>,
+
+        /// Session inactivity timeout in seconds (default: 3600)
+        #[arg(long)]
+        session_timeout: Option<u64>,
     },
 
     /// Start long-running autonomous runtime (gateway + channels + heartbeat + scheduler)
@@ -837,7 +870,8 @@ async fn main() -> Result<()> {
         if config_dir.trim().is_empty() {
             bail!("--config-dir cannot be empty");
         }
-        std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir);
+        // SAFETY: called early in main before any threads are spawned.
+        unsafe { std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir) };
     }
 
     // Completions must remain stdout-only and should not load config or initialize logging.
@@ -859,7 +893,9 @@ async fn main() -> Result<()> {
 
     // Onboard auto-detects the environment: if stdin/stdout are a TTY and no
     // provider flags were given, it runs the full interactive wizard; otherwise
-    // it runs the quick (scriptable) setup.  This means `curl … | bash` and
+    // it runs the quick (scriptable) setup.  Use --quick to force quick setup,
+    // or set ZEROCLAW_INTERACTIVE=1 to force interactive mode when TTY
+    // detection fails.  This means `curl … | bash` and
     // `zeroclaw onboard --api-key …` both take the fast path, while a bare
     // `zeroclaw onboard` in a terminal launches the wizard.
     if let Commands::Onboard {
@@ -870,6 +906,8 @@ async fn main() -> Result<()> {
         provider,
         model,
         memory,
+        quick,
+        tui: use_tui,
     } = &cli.command
     {
         let force = *force;
@@ -879,6 +917,8 @@ async fn main() -> Result<()> {
         let provider = provider.clone();
         let model = model.clone();
         let memory = memory.clone();
+        let quick = *quick;
+        let use_tui = *use_tui;
 
         if reinit && channels_only {
             bail!("--reinit and --channels-only cannot be used together");
@@ -890,6 +930,9 @@ async fn main() -> Result<()> {
         }
         if channels_only && force {
             bail!("--channels-only does not accept --force");
+        }
+        if quick && channels_only {
+            bail!("--quick and --channels-only cannot be used together");
         }
 
         // Handle --reinit: backup and reset configuration
@@ -938,10 +981,26 @@ async fn main() -> Result<()> {
         let has_provider_flags =
             api_key.is_some() || provider.is_some() || model.is_some() || memory.is_some();
         let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        let env_interactive = std::env::var("ZEROCLAW_INTERACTIVE").as_deref() == Ok("1");
+
+        // TUI onboarding mode (ratatui-based)
+        if use_tui {
+            Box::pin(tui::run_tui_onboarding()).await?;
+            return Ok(());
+        }
 
         let config = if channels_only {
             Box::pin(onboard::run_channels_repair_wizard()).await
-        } else if is_tty && !has_provider_flags {
+        } else if quick || has_provider_flags {
+            Box::pin(onboard::run_quick_setup(
+                api_key.as_deref(),
+                provider.as_deref(),
+                model.as_deref(),
+                memory.as_deref(),
+                force,
+            ))
+            .await
+        } else if is_tty || env_interactive {
             Box::pin(onboard::run_wizard(force)).await
         } else {
             Box::pin(onboard::run_quick_setup(
@@ -1015,6 +1074,21 @@ async fn main() -> Result<()> {
             .map(|_| ())
         }
 
+        Commands::Acp {
+            max_sessions,
+            session_timeout,
+        } => {
+            let mut acp_config = channels::acp_server::AcpServerConfig::default();
+            if let Some(max) = max_sessions {
+                acp_config.max_sessions = max;
+            }
+            if let Some(timeout) = session_timeout {
+                acp_config.session_timeout_secs = timeout;
+            }
+            let server = channels::acp_server::AcpServer::new(config, acp_config);
+            server.run().await
+        }
+
         Commands::Gateway { gateway_command } => {
             match gateway_command {
                 Some(zeroclaw::GatewayCommands::Restart { port, host }) => {
@@ -1072,8 +1146,12 @@ async fn main() -> Result<()> {
                         }
                         Ok(None) => {
                             if config.gateway.require_pairing {
-                                println!("🔐 Gateway pairing is enabled, but no active pairing code available.");
-                                println!("   The gateway may already be paired, or the code has been used.");
+                                println!(
+                                    "🔐 Gateway pairing is enabled, but no active pairing code available."
+                                );
+                                println!(
+                                    "   The gateway may already be paired, or the code has been used."
+                                );
                                 println!("   Restart the gateway to generate a new pairing code.");
                             } else {
                                 println!("⚠️  Gateway pairing is disabled in config.");
@@ -1112,6 +1190,16 @@ async fn main() -> Result<()> {
         }
 
         Commands::Daemon { port, host } => {
+            if let Ok(exe) = std::env::current_exe() {
+                let exe_str = exe.to_string_lossy();
+                if exe_str.contains(".cargo/bin") || exe_str.contains("/home/") {
+                    tracing::warn!(
+                        "Daemon running from user home directory: {}. \
+                         Consider installing to /usr/local/bin for system-wide service.",
+                        exe_str
+                    );
+                }
+            }
             let port = port.unwrap_or(config.gateway.port);
             let host = host.unwrap_or_else(|| config.gateway.host.clone());
             if port == 0 {
@@ -1210,9 +1298,37 @@ async fn main() -> Result<()> {
                 config.autonomy.max_actions_per_hour
             );
             println!(
-                "  Max cost/day:      ${:.2}",
-                f64::from(config.autonomy.max_cost_per_day_cents) / 100.0
+                "  Cost tracking:     {}",
+                if config.cost.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
+            println!("  Max cost/day:      ${:.2}", config.cost.daily_limit_usd);
+            println!("  Max cost/month:    ${:.2}", config.cost.monthly_limit_usd);
+            if config.cost.enabled {
+                match cost::CostTracker::new(config.cost.clone(), &config.workspace_dir) {
+                    Ok(tracker) => match tracker.get_summary() {
+                        Ok(summary) => {
+                            println!(
+                                "  Spent today:       ${:.4} / ${:.2}",
+                                summary.daily_cost_usd, config.cost.daily_limit_usd
+                            );
+                            println!(
+                                "  Spent this month:  ${:.4} / ${:.2}",
+                                summary.monthly_cost_usd, config.cost.monthly_limit_usd
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠ Could not load cost usage: {e}");
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("  ⚠ Could not init cost tracker: {e}");
+                    }
+                }
+            }
             println!("  OTP enabled:       {}", config.security.otp.enabled);
             println!("  E-stop enabled:    {}", config.security.estop.enabled);
             println!();
@@ -2648,6 +2764,28 @@ mod tests {
     fn onboard_cli_rejects_removed_interactive_flag() {
         // --interactive was removed; onboard auto-detects TTY instead.
         assert!(Cli::try_parse_from(["zeroclaw", "onboard", "--interactive"]).is_err());
+    }
+
+    #[test]
+    fn onboard_cli_parses_quick_flag() {
+        let cli = Cli::try_parse_from(["zeroclaw", "onboard", "--quick"])
+            .expect("onboard --quick should parse");
+
+        match cli.command {
+            Commands::Onboard { quick, .. } => assert!(quick),
+            other => panic!("expected onboard command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn onboard_cli_quick_and_channels_only_conflict() {
+        // --quick and --channels-only should both parse at the CLI level
+        // (the conflict is checked at runtime), but we verify both flags parse.
+        let cli = Cli::try_parse_from(["zeroclaw", "onboard", "--quick", "--channels-only"]);
+        assert!(
+            cli.is_ok(),
+            "--quick --channels-only should parse at CLI level"
+        );
     }
 
     #[test]
